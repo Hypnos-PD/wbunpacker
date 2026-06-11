@@ -6,6 +6,9 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct AppConfig {
+    /// 数据根目录，所有输出文件都放在这个目录下
+    #[serde(default = "default_data_dir")]
+    pub data_dir: String,
     pub manifest_address: String,
     pub default_version: String,
     pub asset_bundle_address: String,
@@ -20,6 +23,10 @@ pub struct AppConfig {
     pub client_id: i64,
     pub sqlite3mc_key: String,
     pub sqlite3mc_base_key: String,
+}
+
+fn default_data_dir() -> String {
+    "data".into()
 }
 
 #[derive(Debug, Deserialize)]

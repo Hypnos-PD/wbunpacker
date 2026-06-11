@@ -1,3 +1,6 @@
+# 数据根目录
+data_dir = "D:/WBUnpacker"
+
 # wbunpacker 配置文件
 # 复制为 Config.local.toml 后修改
 
@@ -9,7 +12,8 @@ default_version = "180106783552"
 manifest_address = "https://shadowverse-wb.akamaized.net/dl/manifests/Windows/{version}/assetbundle.{variant}.manifest"
 
 # AssetBundle 下载地址模板
-asset_bundle_address = "https://shadowverse-wb.akamaized.net/dl/assetbundles/Windows/{version}/{hash}/{name}"
+# {hash_dir} = hash 前2位, {hash} = 完整 hash
+asset_bundle_address = "https://shadowverse-wb.akamaized.net/dl/assetbundles/Windows/{hash_dir}/{hash}"
 
 # 服务器 API 地址
 version_address = "https://web11.shadowverse-wb.jp/cygames/Version/info"

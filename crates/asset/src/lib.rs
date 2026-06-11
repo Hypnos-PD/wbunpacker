@@ -33,9 +33,8 @@
 
 use anyhow::Context;
 use base64::Engine;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek};
 use std::path::Path;
-use tokio::io::AsyncReadExt;
 
 // ============================================================================
 // 常量
@@ -145,51 +144,225 @@ impl<R: Read + Seek> AssetBundleDecryptor<R> {
 // 下载功能
 // ============================================================================
 
-/// 单个 AssetBundle 或 RawAsset 的下载结果。
+/// 下载结果。
+#[derive(Debug)]
 pub struct DownloadResult {
-    /// 保存到本地的文件路径
     pub path: String,
-    /// 下载的字节数
     pub size: u64,
-    /// 是否为 RawAsset（不需要解密）
-    pub is_raw: bool,
 }
 
-/// 从 CDN 下载单个资源。
+/// 批量下载、解密统计。
+#[derive(Debug, Default)]
+pub struct BatchStats {
+    pub done: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub downloaded_bytes: u64,
+}
+
+/// 根据 manifest 中的 hash 构建 CDN 下载 URL。
 ///
-/// # 参数
-/// - `asset_path`: 资源在 manifest 中的路径
-/// - `cdn_base`: CDN 基础地址
-/// - `dest_dir`: 本地保存目录
-/// - `headers`: 自定义 HTTP header（含认证信息）
+/// URL 模板占位符: {hash_dir} = hash 前 2 位, {hash} = 完整 hash
+pub fn build_download_url(hash: &str, cdn_template: &str) -> String {
+    let dir = if hash.len() >= 2 { &hash[..2] } else { hash };
+    cdn_template
+        .replace("{hash_dir}", dir)
+        .replace("{hash}", hash)
+}
+
+/// 下载单个加密 AssetBundle 到本地。
 pub async fn download_asset(
-    asset_path: &str,
-    cdn_base: &str,
-    dest_dir: &Path,
-    headers: &std::collections::HashMap<String, String>,
+    hash: &str,
+    cdn_template: &str,
+    dest_path: &Path,
 ) -> anyhow::Result<DownloadResult> {
-    todo!("单个资源下载实现")
+    let url = build_download_url(hash, cdn_template);
+    tracing::debug!("下载: {url}");
+
+    let response = reqwest::get(&url)
+        .await
+        .with_context(|| format!("下载请求失败: {url}"))?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "下载失败: HTTP {} — {url}",
+            response.status().as_u16()
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| "读取响应体失败")?;
+
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("无法创建目录: {}", parent.display()))?;
+    }
+
+    std::fs::write(dest_path, &bytes)
+        .with_context(|| format!("无法写入文件: {}", dest_path.display()))?;
+
+    Ok(DownloadResult {
+        path: dest_path.display().to_string(),
+        size: bytes.len() as u64,
+    })
 }
 
-/// 批量下载并解密 manifest 中的所有资源。
+/// 使用 XOR 流解密加密的 AssetBundle 文件，写入输出路径。
 ///
-/// 使用 tokio Semaphore 控制并发数。
-/// 已存在的解密文件自动跳过（断点续传）。
-///
-/// # 参数
-/// - `manifest`: 已解析的资源清单
-/// - `cdn_base`: CDN 基础地址
-/// - `concurrency`: 最大并发下载数
-/// - `dest_downloads`: 加密文件保存目录
-/// - `dest_decrypted`: 解密文件保存目录
-pub async fn batch_download(
-    manifest: &manifest::Manifest,
-    cdn_base: &str,
-    concurrency: usize,
-    dest_downloads: &Path,
-    dest_decrypted: &Path,
+/// 前 256 字节透传（Unity header），后续字节按 keystream XOR。
+pub fn decrypt_file(
+    input_path: &Path,
+    output_path: &Path,
+    base_keys_b64: &str,
+    asset_key: i64,
 ) -> anyhow::Result<()> {
-    todo!("批量下载 + 解密实现")
+    let file = std::fs::File::open(input_path)
+        .with_context(|| format!("无法打开加密文件: {}", input_path.display()))?;
+
+    let mut decryptor = AssetBundleDecryptor::new(file, base_keys_b64, asset_key)?;
+
+    let mut buffer = [0u8; 8192];
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = std::fs::File::create(output_path)?;
+
+    loop {
+        let n = decryptor.decrypt_to(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut out, &buffer[..n])?;
+    }
+
+    Ok(())
+}
+
+/// 批量下载并解密所有 AssetBundle。
+///
+/// - 已存在的解密文件自动跳过
+/// - 使用 Semaphore 控制并发
+/// - RawAsset 仅下载不解密
+pub async fn batch_download(
+    m: &manifest::Manifest,
+    cdn_template: &str,
+    base_keys_b64: &str,
+    concurrency: usize,
+    dest_raw: &Path,
+    dest_decrypted: &Path,
+    dest_raw_assets: &Path,
+) -> anyhow::Result<BatchStats> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+    use tokio::sync::Semaphore;
+
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let done = Arc::new(AtomicUsize::new(0));
+    let skipped = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
+    let dl_bytes = Arc::new(AtomicU64::new(0));
+
+    let total = m.assets.len() + m.raw_assets.len();
+    tracing::info!(
+        "批量处理: {} AssetBundle + {} RawAsset, 共 {} 个, 并发 {}",
+        m.assets.len(),
+        m.raw_assets.len(),
+        total,
+        concurrency
+    );
+
+    let mut tasks = Vec::with_capacity(total);
+
+    for asset in &m.assets {
+        let hash = asset.hash.clone();
+        let key = asset.key;
+        let name = asset.name.clone();
+        let cdn = cdn_template.to_string();
+        let b64 = base_keys_b64.to_string();
+        let raw_dir = dest_raw.to_path_buf();
+        let dec_dir = dest_decrypted.to_path_buf();
+        let sem = semaphore.clone();
+        let d = done.clone();
+        let s = skipped.clone();
+        let f = failed.clone();
+        let db = dl_bytes.clone();
+
+        tasks.push(tokio::spawn(async move {
+            let dec_path = dec_dir.join(&name).with_extension("ab");
+            if dec_path.exists() {
+                s.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+
+            let _permit = sem.acquire().await.unwrap();
+            let raw_path = raw_dir.join(&name);
+
+            if !raw_path.exists() {
+                match download_asset(&hash, &cdn, &raw_path).await {
+                    Ok(r) => { db.fetch_add(r.size, Ordering::Relaxed); }
+                    Err(e) => {
+                        tracing::error!("下载失败 {}: {e}", name);
+                        f.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+
+            match decrypt_file(&raw_path, &dec_path, &b64, key) {
+                Ok(()) => { d.fetch_add(1, Ordering::Relaxed); }
+                Err(e) => {
+                    tracing::error!("解密失败 {}: {e}", name);
+                    f.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+
+    for raw in &m.raw_assets {
+        let hash = raw.hash.clone();
+        let name = raw.name.clone();
+        let cdn = cdn_template.to_string();
+        let raw_asset_dir = dest_raw_assets.to_path_buf();
+        let sem = semaphore.clone();
+        let d = done.clone();
+        let s = skipped.clone();
+        let f = failed.clone();
+        let db = dl_bytes.clone();
+
+        tasks.push(tokio::spawn(async move {
+            let raw_path = raw_asset_dir.join(&name);
+            if raw_path.exists() {
+                s.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+
+            let _permit = sem.acquire().await.unwrap();
+
+            match download_asset(&hash, &cdn, &raw_path).await {
+                Ok(r) => {
+                    db.fetch_add(r.size, Ordering::Relaxed);
+                    d.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    tracing::error!("RawAsset 下载失败 {}: {e}", name);
+                    f.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+
+    for task in tasks {
+        let _ = task.await;
+    }
+
+    Ok(BatchStats {
+        done: done.load(Ordering::Relaxed),
+        skipped: skipped.load(Ordering::Relaxed),
+        failed: failed.load(Ordering::Relaxed),
+        downloaded_bytes: dl_bytes.load(Ordering::Relaxed),
+    })
 }
 
 // ============================================================================
