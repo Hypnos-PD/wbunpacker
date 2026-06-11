@@ -29,7 +29,7 @@ enum Command {
         #[arg(short = 'V', long)]
         version: Option<String>,
         /// 语言变体: Chs/Eng/Jpn/Kor/Cht
-        #[arg(short, long, default_value = "Chs")]
+        #[arg(short, long)]
         variant: String,
         /// 输出格式: raw(二进制) 或 json
         #[arg(short, long, default_value = "raw")]
@@ -111,8 +111,22 @@ enum AssetCmd {
 
 #[derive(Subcommand)]
 enum AudioCmd {
-    WwiseMap { #[arg(short, long)] mapping: String, #[arg(short, long)] pck_root: String, #[arg(long)] wwiser_path: String, #[arg(short, long, default_value = "data/exports/audio/wem_mapping.json")] output: String },
-    Extract { #[arg(short, long)] pck_root: Option<String>, #[arg(short, long)] force: bool },
+    WwiseMap {
+        #[arg(short, long)]
+        mapping: String,
+        #[arg(short, long)]
+        pck_root: String,
+        #[arg(long)]
+        wwiser_path: String,
+        #[arg(short, long, default_value = "data/exports/audio/wem_mapping.json")]
+        output: String,
+    },
+    Extract {
+        #[arg(short, long)]
+        pck_root: Option<String>,
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 // ============================================================================
