@@ -28,7 +28,7 @@ enum Command {
         /// 资源版本号，如 "100000000000"；不指定则使用配置文件中的 DefaultVersion
         #[arg(short = 'V', long)]
         version: Option<String>,
-        /// 语言变体: Chs/Eng/Jpn/Kor/Cht
+        /// 语言变体: Chs/Eng/Jpn/Kor/Cht，或 all 一次下载全部
         #[arg(short, long)]
         variant: String,
         /// 输出格式: raw(二进制) 或 json
@@ -133,6 +133,8 @@ enum AudioCmd {
 // 主函数
 // ============================================================================
 
+const ALL_VARIANTS: &[&str] = &["Chs", "Eng", "Jpn", "Kor", "Cht"];
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -148,24 +150,32 @@ async fn main() -> anyhow::Result<()> {
         Command::Manifest { version, variant, format } => {
             let cfg = config::load()?;
             let version = version.unwrap_or(cfg.default_version);
-            let raw = manifest::download(&version, &variant, &cfg.manifest_address).await?;
 
-            let manifests_dir = format!("{}/manifests", cfg.data_dir);
+            let targets: Vec<&str> = if variant.eq_ignore_ascii_case("all") {
+                ALL_VARIANTS.to_vec()
+            } else {
+                vec![&variant]
+            };
 
-            match format.as_str() {
-                "json" => {
-                    let m = manifest::parse(&raw)?;
-                    let json = manifest::to_json(&m)?;
-                    let out = format!("{}/json/assetbundle.{}.manifest.json", manifests_dir, variant);
-                    std::fs::create_dir_all(format!("{}/json", manifests_dir))?;
-                    std::fs::write(&out, json)?;
-                    println!("{}", out);
-                }
-                _ => {
-                    let out = format!("{}/raw/assetbundle.{}.manifest", manifests_dir, variant);
-                    std::fs::create_dir_all(format!("{}/raw", manifests_dir))?;
-                    std::fs::write(&out, &raw)?;
-                    println!("{}", out);
+            for v in &targets {
+                let raw = manifest::download(&version, v, &cfg.manifest_address).await?;
+                let manifests_dir = format!("{}/manifests", cfg.data_dir);
+
+                match format.as_str() {
+                    "json" => {
+                        let m = manifest::parse(&raw)?;
+                        let json = manifest::to_json(&m)?;
+                        let out = format!("{}/json/assetbundle.{}.manifest.json", manifests_dir, v);
+                        std::fs::create_dir_all(format!("{}/json", manifests_dir))?;
+                        std::fs::write(&out, json)?;
+                        println!("{}", out);
+                    }
+                    _ => {
+                        let out = format!("{}/raw/assetbundle.{}.manifest", manifests_dir, v);
+                        std::fs::create_dir_all(format!("{}/raw", manifests_dir))?;
+                        std::fs::write(&out, &raw)?;
+                        println!("{}", out);
+                    }
                 }
             }
         }
@@ -179,20 +189,23 @@ async fn main() -> anyhow::Result<()> {
                     .with_context(|| format!("请先运行: wbu manifest -v {variant} --format json"))?;
                 let m: manifest::Manifest = serde_json::from_str(&json)?;
 
-                let downloads_dir = format!("{}/downloads", cfg.data_dir);
+                let blobs_dir = std::path::Path::new(&cfg.data_dir).join("blobs");
+                let variant_dir = std::path::Path::new(&cfg.data_dir).join("variants").join(&variant);
+
                 let stats = asset::batch_download(
                     &m,
                     &cfg.asset_bundle_address,
                     &cfg.asset_bundle_base_keys,
                     concurrency,
-                    std::path::Path::new(&format!("{}/raw", downloads_dir)),
-                    std::path::Path::new(&format!("{}/decrypted", downloads_dir)),
-                    std::path::Path::new(&format!("{}/raw-assets", downloads_dir)),
+                    &blobs_dir,
+                    &variant_dir,
                 ).await?;
 
-                println!("完成: {} | 跳过: {} | 失败: {} | 下载: {:.1} MB",
-                    stats.done, stats.skipped, stats.failed,
-                    stats.downloaded_bytes as f64 / 1024.0 / 1024.0);
+                println!(
+                    "完成: {} | 跳过: {} | 失败: {} | 硬链接: {} | 下载: {:.1} MB",
+                    stats.done, stats.skipped, stats.failed, stats.hardlinks,
+                    stats.downloaded_bytes as f64 / 1024.0 / 1024.0
+                );
             }
             AssetCmd::Download { name, variant } => {
                 let cfg = config::load()?;
@@ -201,15 +214,28 @@ async fn main() -> anyhow::Result<()> {
                     .with_context(|| format!("请先运行: wbu manifest -v {variant} --format json"))?;
                 let m: manifest::Manifest = serde_json::from_str(&json)?;
 
+                let blobs_raw = std::path::Path::new(&cfg.data_dir).join("blobs").join("raw");
+                let variant_links = std::path::Path::new(&cfg.data_dir).join("variants").join(&variant);
+
                 // 查找 asset 或 raw_asset
                 if let Some(asset) = m.assets.iter().find(|a| a.name == name) {
-                    let dest = std::path::Path::new(&format!("{}/downloads/raw", cfg.data_dir)).join(&asset.name);
-                    let result = asset::download_asset(&asset.hash, &cfg.asset_bundle_address, &dest).await?;
-                    println!("下载完成: {} ({} bytes)", result.path, result.size);
+                    let blob_path = asset::blob_path(&blobs_raw, "", &asset.hash);
+                    let result = asset::download_asset(&asset.hash, &cfg.asset_bundle_address, &blob_path).await?;
+                    println!("下载: {} ({} bytes)", result.path, result.size);
+
+                    let link_path = variant_links.join("raw").join(&asset.name);
+                    if asset::hardlink_or_skip(&blob_path, &link_path)? {
+                        println!("硬链接: {}", link_path.display());
+                    }
                 } else if let Some(raw) = m.raw_assets.iter().find(|r| r.name == name) {
-                    let dest = std::path::Path::new(&format!("{}/downloads/raw-assets", cfg.data_dir)).join(&raw.name);
-                    let result = asset::download_asset(&raw.hash, &cfg.asset_bundle_address, &dest).await?;
-                    println!("下载完成: {} ({} bytes)", result.path, result.size);
+                    let blob_path = asset::blob_path(&blobs_raw, "", &raw.hash);
+                    let result = asset::download_asset(&raw.hash, &cfg.asset_bundle_address, &blob_path).await?;
+                    println!("下载: {} ({} bytes)", result.path, result.size);
+
+                    let link_path = variant_links.join("raw-assets").join(&raw.name);
+                    if asset::hardlink_or_skip(&blob_path, &link_path)? {
+                        println!("硬链接: {}", link_path.display());
+                    }
                 } else {
                     anyhow::bail!("未找到资源: {name}");
                 }
@@ -223,12 +249,9 @@ async fn main() -> anyhow::Result<()> {
                     .find(|a| a.name == name)
                     .ok_or_else(|| anyhow::anyhow!("manifest 中未找到资源: {name}"))?;
 
-                let output_dir = format!("{}/downloads/decrypted", cfg.data_dir);
-                let output = std::path::Path::new(&output_dir).join(&asset.name).with_extension("ab");
-
-                if let Some(parent) = output.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
+                // 解密到 blob 存储
+                let blobs_decrypted = std::path::Path::new(&cfg.data_dir).join("blobs").join("decrypted");
+                let output = asset::blob_path(&blobs_decrypted, "", &asset.hash);
 
                 let file_path = std::path::Path::new(&file);
                 asset::decrypt_file(file_path, &output, &cfg.asset_bundle_base_keys, asset.key)?;
