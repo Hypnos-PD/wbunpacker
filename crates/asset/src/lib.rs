@@ -18,18 +18,13 @@
 //! variants/{variant}/raw-assets/{name}    ← ──硬链接→ blobs/raw/...
 //! `
 //!
-//! 游戏更新时同名文件 hash 变化 → 新 blob 自动下载，
-//! 旧 blob 保留不删，硬链接更新指向新 blob。
+//! 游戏更新时同名文件 hash/checksum 变化 → 新 blob 自动下载，
+//! 旧 blob 保留不删，硬链接自动更新指向新 blob。
 //!
-//! # 加密机制
+//! # 跳过策略
 //!
-//! 游戏使用分层 XOR 加密保护 AssetBundle：
-//!
-//! 1. **BaseKeys**: 配置文件中固定的 Base64 密钥串（由 ConeShell 算法生成）
-//! 2. **Per-Asset Key**: 每个 AssetBundle 在 manifest 中有独立的 64 位整数 key
-//! 3. **Keystream 生成**: yte = BaseKeys[i] XOR per_asset_key_bytes[i % 8]
-//! 4. **解密方式**: 文件前 256 字节保留不解密（Unity header），
-//!    之后的字节与 keystream 逐字节 XOR
+//! AssetBundle: size 快速预筛 → CRC64 精确校验 → 一致才跳过
+//! RawAsset（无 checksum 字段）: size 比对
 
 use anyhow::Context;
 use base64::Engine;
@@ -158,6 +153,23 @@ pub fn hardlink_or_skip(src: &Path, dst: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// 计算文件 CRC-64/ECMA-182 校验和
+fn crc64_file(path: &Path) -> std::io::Result<u64> {
+    use crc::{Crc, CRC_64_ECMA_182};
+    let crc64 = Crc::<u64>::new(&CRC_64_ECMA_182);
+    let mut digest = crc64.digest();
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        digest.update(&buf[..n]);
+    }
+    Ok(digest.finalize())
+}
+
 // ============================================================================
 // 下载与解密
 // ============================================================================
@@ -238,7 +250,8 @@ pub fn decrypt_file(
 /// 4. 硬链接到 variants/{variant}/decrypted/{name}.ab
 /// 5. RawAsset: 下载到 blob → 硬链接
 ///
-/// 游戏更新时，同名文件 hash/size 变化 → 旧 blob 保留，硬链接自动更新。
+/// AssetBundle 跳过判断: size 快速预筛 → CRC64 精确校验。
+/// RawAsset（无 checksum）: size 比对。
 pub async fn batch_download(
     m: &manifest::Manifest,
     cdn_template: &str,
@@ -285,6 +298,7 @@ pub async fn batch_download(
         let key = asset.key;
         let name = asset.name.clone();
         let asset_size = asset.size as u64;
+        let checksum = asset.checksum;
         let cdn = cdn_template.to_string();
         let b64 = base_keys_b64.to_string();
         let blob_raw_path = blob_path(&blobs_raw, "", &hash);
@@ -300,9 +314,11 @@ pub async fn batch_download(
         let pb = pb.clone();
 
         tasks.push(tokio::spawn(async move {
-            // 跳过判断：比对 manifest 中的 size，防止游戏更新后内容变化
-            if link_dec.exists() {
-                if std::fs::metadata(&link_dec).map(|m| m.len()).unwrap_or(0) == asset_size {
+            // 跳过判断：size 预筛 + CRC64 精确校验
+            if link_dec.exists()
+                && std::fs::metadata(&link_dec).map(|m| m.len()).unwrap_or(0) == asset_size
+            {
+                if crc64_file(&link_dec).ok() == Some(checksum) {
                     s.fetch_add(1, Ordering::Relaxed);
                     pb.inc(1);
                     return;
@@ -347,7 +363,7 @@ pub async fn batch_download(
         }));
     }
 
-    // RawAsset: 下载到 blob → 硬链接
+    // RawAsset: 下载到 blob → 硬链接（无 checksum，仅 size 比对）
     for raw in &m.raw_assets {
         let hash = raw.hash.clone();
         let name = raw.name.clone();
@@ -364,12 +380,12 @@ pub async fn batch_download(
         let pb = pb.clone();
 
         tasks.push(tokio::spawn(async move {
-            if link_raw_asset.exists() {
-                if std::fs::metadata(&link_raw_asset).map(|m| m.len()).unwrap_or(0) == raw_size {
-                    s.fetch_add(1, Ordering::Relaxed);
-                    pb.inc(1);
-                    return;
-                }
+            if link_raw_asset.exists()
+                && std::fs::metadata(&link_raw_asset).map(|m| m.len()).unwrap_or(0) == raw_size
+            {
+                s.fetch_add(1, Ordering::Relaxed);
+                pb.inc(1);
+                return;
             }
 
             let _permit = sem.acquire().await.unwrap();
