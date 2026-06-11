@@ -1,0 +1,26 @@
+[package]
+name = "wbunpacker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wbu"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+manifest = { path = "../manifest" }
+asset = { path = "../asset" }
+master-data = { path = "../master-data" }
+audio = { path = "../audio" }
+texture = { path = "../texture" }
+version = { path = "../version" }
+metadb = { path = "../metadb" }

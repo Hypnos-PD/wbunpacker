@@ -1,0 +1,39 @@
+# wbunpacker 配置文件
+# 复制为 Config.local.toml 后修改
+
+# 资源版本号: 从 CDN 地址中获取，如 dl/manifests/Windows/<此处>/
+default_version = "180106783552"
+
+# Manifest 下载地址模板
+# {version} = 资源版本号, {variant} = 语言变体 (Jpn 时自动省略后缀)
+manifest_address = "https://shadowverse-wb.akamaized.net/dl/manifests/Windows/{version}/assetbundle.{variant}.manifest"
+
+# AssetBundle 下载地址模板
+asset_bundle_address = "https://shadowverse-wb.akamaized.net/dl/assetbundles/Windows/{version}/{hash}/{name}"
+
+# 服务器 API 地址
+version_address = "https://web11.shadowverse-wb.jp/cygames/Version/info"
+
+# 请求头
+common_header = ""
+routing_header = ""
+
+# 客户端信息
+app_version = "1.7.10"
+device_uuid = ""
+md5_salt = ""
+client_id = 0
+
+# 解密密钥
+asset_bundle_base_keys = ""
+sqlite3mc_key = ""
+sqlite3mc_base_key = ""
+
+[device_info]
+platform = 4
+device = 3
+device_name = ""
+platform_os_version = ""
+gpu_vendor = ""
+graphics_memory_mb = ""
+processor_type = ""
