@@ -24,7 +24,7 @@ enum Command {
 
     /// 下载并解析资源清单
     Manifest {
-        /// 资源版本号，如 "180106783552"；不指定则使用配置文件中的 DefaultVersion
+        /// 资源版本号，如 "100000000000"；不指定则使用配置文件中的 DefaultVersion
         #[arg(short = 'V', long)]
         version: Option<String>,
         /// 语言变体: Chs/Eng/Jpn/Kor/Cht
