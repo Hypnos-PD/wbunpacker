@@ -18,7 +18,8 @@
 //! variants/{variant}/raw-assets/{name}    ← ──硬链接→ blobs/raw/...
 //! `
 //!
-//! 同一 hash 只存一份，不同变体通过硬链接共享同一份数据。
+//! 游戏更新时同名文件 hash 变化 → 新 blob 自动下载，
+//! 旧 blob 保留不删，硬链接更新指向新 blob。
 //!
 //! # 加密机制
 //!
@@ -136,10 +137,19 @@ pub fn blob_path(blobs_dir: &Path, category: &str, hash: &str) -> std::path::Pat
     blobs_dir.join(category).join(dir).join(hash)
 }
 
-/// 创建硬链接，若目标已存在则跳过
+/// 创建硬链接。
+///
+/// - 目标不存在 → 创建链接，返回 	rue
+/// - 目标存在且文件大小与源一致 → 跳过，返回 alse
+/// - 目标存在但大小不一致（游戏更新导致内容变化）→ 删除旧链接后重建，返回 	rue
 pub fn hardlink_or_skip(src: &Path, dst: &Path) -> std::io::Result<bool> {
     if dst.exists() {
-        return Ok(false);
+        if let (Ok(s_meta), Ok(d_meta)) = (std::fs::metadata(src), std::fs::metadata(dst)) {
+            if s_meta.len() == d_meta.len() {
+                return Ok(false);
+            }
+        }
+        std::fs::remove_file(dst)?;
     }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
@@ -227,6 +237,8 @@ pub fn decrypt_file(
 /// 3. 解密到 blobs/decrypted/{hash[..2]}/{hash}
 /// 4. 硬链接到 variants/{variant}/decrypted/{name}.ab
 /// 5. RawAsset: 下载到 blob → 硬链接
+///
+/// 游戏更新时，同名文件 hash/size 变化 → 旧 blob 保留，硬链接自动更新。
 pub async fn batch_download(
     m: &manifest::Manifest,
     cdn_template: &str,
@@ -272,6 +284,7 @@ pub async fn batch_download(
         let hash = asset.hash.clone();
         let key = asset.key;
         let name = asset.name.clone();
+        let asset_size = asset.size as u64;
         let cdn = cdn_template.to_string();
         let b64 = base_keys_b64.to_string();
         let blob_raw_path = blob_path(&blobs_raw, "", &hash);
@@ -287,10 +300,13 @@ pub async fn batch_download(
         let pb = pb.clone();
 
         tasks.push(tokio::spawn(async move {
+            // 跳过判断：比对 manifest 中的 size，防止游戏更新后内容变化
             if link_dec.exists() {
-                s.fetch_add(1, Ordering::Relaxed);
-                pb.inc(1);
-                return;
+                if std::fs::metadata(&link_dec).map(|m| m.len()).unwrap_or(0) == asset_size {
+                    s.fetch_add(1, Ordering::Relaxed);
+                    pb.inc(1);
+                    return;
+                }
             }
 
             let _permit = sem.acquire().await.unwrap();
@@ -335,6 +351,7 @@ pub async fn batch_download(
     for raw in &m.raw_assets {
         let hash = raw.hash.clone();
         let name = raw.name.clone();
+        let raw_size = raw.size as u64;
         let cdn = cdn_template.to_string();
         let blob_raw_path = blob_path(&blobs_raw, "", &hash);
         let link_raw_asset = variant_dir.join("raw-assets").join(&name);
@@ -348,9 +365,11 @@ pub async fn batch_download(
 
         tasks.push(tokio::spawn(async move {
             if link_raw_asset.exists() {
-                s.fetch_add(1, Ordering::Relaxed);
-                pb.inc(1);
-                return;
+                if std::fs::metadata(&link_raw_asset).map(|m| m.len()).unwrap_or(0) == raw_size {
+                    s.fetch_add(1, Ordering::Relaxed);
+                    pb.inc(1);
+                    return;
+                }
             }
 
             let _permit = sem.acquire().await.unwrap();
