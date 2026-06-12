@@ -44,6 +44,9 @@ enum Command {
         /// 语言变体: Chs/Eng/Jpn/Kor/Cht，或 all
         #[arg(short, long, default_value = "Chs")]
         variant: String,
+        /// 强制重新下载 mastermemory.bytes（即使已缓存）
+        #[arg(short = 'F', long)]
+        force: bool,
     },
 
     /// 提取卡牌语音 (骨架)
@@ -217,11 +220,10 @@ async fn main() -> anyhow::Result<()> {
             }
         },
 
-        Command::Master { variant } => {
+        Command::Master { variant, force } => {
             let cfg = config::load()?;
 
             for v in expand_variants(&variant) {
-                // 1. 加载 manifest，找到 mastermemory.bytes 的 hash
                 let manifest_path = format!("{}/manifests/json/assetbundle.{}.manifest.json", cfg.data_dir, v);
                 let json = std::fs::read_to_string(&manifest_path)
                     .with_context(|| format!("请先运行: wbu manifest -v {v} --format json"))?;
@@ -229,18 +231,22 @@ async fn main() -> anyhow::Result<()> {
 
                 let master_entry = m.raw_assets.iter()
                     .find(|r| r.name == MASTER_BYTES_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("manifest 中未找到 {MASTER_BYTES_NAME}"))?;
+                    .ok_or_else(|| anyhow::anyhow!("manifest 中未找到 {}", MASTER_BYTES_NAME))?;
 
-                // 2. 确保文件已下载（blob 存储）
                 let blobs_raw = std::path::Path::new(&cfg.data_dir).join("blobs").join("raw");
                 let blob_path = asset::blob_path(&blobs_raw, "", &master_entry.hash);
 
+                // --force: 删除旧缓存，强制重下
+                if force && blob_path.exists() {
+                    std::fs::remove_file(&blob_path)?;
+                    println!("[{v}] 已删除缓存，重新下载...");
+                }
+
                 if !blob_path.exists() {
-                    println!("[{v}] 下载 {MASTER_BYTES_NAME}...");
+                    println!("[{v}] 下载 {} ...", MASTER_BYTES_NAME);
                     asset::download_asset(&master_entry.hash, &cfg.asset_bundle_address, &blob_path).await?;
                 }
 
-                // 3. 读取并导出
                 let raw = std::fs::read(&blob_path)
                     .with_context(|| format!("无法读取: {}", blob_path.display()))?;
 
