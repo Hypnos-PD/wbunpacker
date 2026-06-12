@@ -50,11 +50,7 @@ enum Command {
     },
 
     /// 提取音频: 解密 Wwise 映射 → 解析 AKPK → WEM 提取 → WAV 输出
-    Audio {
-        /// 语言变体: Chs/Eng/Jpn/Kor/Cht，或 all
-        #[arg(short, long, default_value = "all")]
-        variant: String,
-    },
+    Audio,
 
     /// 处理卡图纹理 (骨架)
     Texture {
@@ -257,31 +253,29 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Audio { variant } => {
+        Command::Audio => {
             let cfg = config::load()?;
             let vgmstream_path = std::path::Path::new(&cfg.vgmstream_path);
 
-            for v in expand_variants(&variant) {
-                // 1. 解密 Wwise 事件映射表
-                let mapping_path = std::path::Path::new(&cfg.data_dir)
-                    .join("variants").join(&v).join("raw-assets")
-                    .join("sound/WwiseIdMapping.bytes");
-                let data = std::fs::read(&mapping_path)
-                    .with_context(|| format!("[{v}] 请先运行 wbu asset batch -v {v}"))?;
-                let event_map = audio::wwise::decrypt_wwise_event_table(&data)?;
+            // 用第一个变体找 WwiseIdMapping（所有变体指向同一文件）
+            let first_variant = "Chs";
+            let mapping_path = std::path::Path::new(&cfg.data_dir)
+                .join("variants").join(first_variant).join("raw-assets")
+                .join("sound/WwiseIdMapping.bytes");
+            let data = std::fs::read(&mapping_path)
+                .with_context(|| format!("请先运行 wbu asset batch -v {first_variant}"))?;
+            let event_map = audio::wwise::decrypt_wwise_event_table(&data)?;
 
-                // 2. 扫描 .pck 文件目录
-                let pck_dir = std::path::Path::new(&cfg.data_dir)
-                    .join("variants").join(&v).join("raw-assets").join("sound");
-                let output_dir = std::path::Path::new(&cfg.data_dir)
-                    .join("exports").join("audio").join(&v);
+            let pck_dir = std::path::Path::new(&cfg.data_dir)
+                .join("variants").join(first_variant).join("raw-assets").join("sound");
+            let output_dir = std::path::Path::new(&cfg.data_dir)
+                .join("exports").join("audio");
 
-                println!("[{v}] 扫描 {}", pck_dir.display());
-                let stats = audio::extract_all(&pck_dir, &output_dir, &event_map, vgmstream_path)?;
+            println!("扫描 {}", pck_dir.display());
+            let stats = audio::extract_all(&pck_dir, &output_dir, &event_map, vgmstream_path)?;
 
-                println!("[{v}] pck: {} | WAV: {} | 跳过: {} | 失败: {}",
-                    stats.pck_files, stats.wav_output, stats.skipped, stats.failed);
-            }
+            println!("pck: {} | WAV: {} | 跳过: {} | 失败: {}",
+                stats.pck_files, stats.wav_output, stats.skipped, stats.failed);
         }
         Command::Texture { .. } => todo!("texture"),
         Command::Metadb { .. } => todo!("metadb"),
