@@ -47,6 +47,8 @@ enum Command {
         /// 强制重新下载 mastermemory.bytes（即使已缓存）
         #[arg(short = 'F', long)]
         force: bool,
+        #[command(subcommand)]
+        sub: Option<MasterCmd>,
     },
 
     /// 提取音频: 解密 Wwise 映射 → 解析 AKPK → WEM 提取 → WAV 输出
@@ -83,6 +85,12 @@ enum AssetCmd {
     Download { name: String, #[arg(short, long, default_value = "Chs")] variant: String },
     Decrypt { #[arg(short = 'f', long)] file: String, #[arg(short = 'n', long)] name: String, #[arg(short, long)] manifest: String },
     Batch { #[arg(short, long, default_value = "Chs")] variant: String, #[arg(short = 'c', long, default_value = "8")] concurrency: usize },
+}
+
+#[derive(Subcommand)]
+enum MasterCmd {
+    /// 生成 cards_full.json：合并 CardMaster + BaseCardMaster + SkillMaster + 5语言卡名
+    Cards,
 }
 
 #[derive(Subcommand)]
@@ -236,11 +244,21 @@ async fn main() -> anyhow::Result<()> {
             }
         },
 
-        Command::Master { variant, force } => {
+        Command::Master { variant, force, sub } => {
             let cfg = config::load()?;
+            let data_dir = std::path::Path::new(&cfg.data_dir);
 
-            for v in expand_variants(&variant) {
-                let manifest_path = format!("{}/manifests/json/assetbundle.{}.manifest.json", cfg.data_dir, v);
+            match sub {
+                Some(MasterCmd::Cards) => {
+                    let master_data_dir = data_dir.join("exports").join("master-data");
+                    let output_path = data_dir.join("exports").join("analysis").join("cards_full.json");
+                    println!("生成 cards_full.json...");
+                    let count = master_data::generate_cards_full(&master_data_dir, &output_path)?;
+                    println!("完成: {} 张卡 => {}", count, output_path.display());
+                }
+                None => {
+                    for v in expand_variants(&variant) {
+                        let manifest_path = format!("{}/manifests/json/assetbundle.{}.manifest.json", cfg.data_dir, v);
                 let json = std::fs::read_to_string(&manifest_path)
                     .with_context(|| format!("请先运行: wbu manifest -v {v} --format json"))?;
                 let m: manifest::Manifest = serde_json::from_str(&json)?;
@@ -273,6 +291,8 @@ async fn main() -> anyhow::Result<()> {
 
                 let total_rows: usize = results.iter().map(|r| r.rows).sum();
                 println!("[{v}] 完成: {} 个表, {} 行", results.len(), total_rows);
+            }
+                }
             }
         }
 

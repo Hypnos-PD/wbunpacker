@@ -208,6 +208,191 @@ pub fn export_all(raw: &[u8], output_dir: &Path) -> anyhow::Result<Vec<ExportRes
     Ok(results)
 }
 
+
+// ---------------------------------------------------------------------------
+// cards_full.json 生成
+// ---------------------------------------------------------------------------
+
+/// cards_full.json 的单卡条目
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CardFullEntry {
+    card_id: i64,
+    base_card_id: i64,
+    card_style_id: i64,
+    class: i64,
+    cost: Option<serde_json::Value>,
+    rarity: Option<serde_json::Value>,
+    type_flags: Option<serde_json::Value>,
+    is_evolution: bool,
+    evolves_to: i64,
+    skills: Vec<SkillEntry>,
+    resource_id: i64,
+    name_chs: String,
+    name_eng: String,
+    name_jpn: String,
+    name_kor: String,
+    name_cht: String,
+    text_keys: TextKeys,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SkillEntry {
+    skill_id: i64,
+    #[serde(rename = "type")]
+    skill_type: i64,
+    subtype: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct TextKeys {
+    name: String,
+    skill_desc: String,
+    flavor_1: String,
+    flavor_2: String,
+    cv: String,
+}
+
+/// 从已导出的 master-data JSON 文件生成 cards_full.json。
+///
+/// 需要先运行 `wbu master -v all` 导出所有 5 语言的主数据表。
+///
+/// # 参数
+/// - `master_data_dir`: exports/master-data/ 目录（下面有 Chs/ Eng/ Jpn/ Kor/ Cht/ 子目录）
+/// - `output_path`: cards_full.json 输出路径
+pub fn generate_cards_full(
+    master_data_dir: &Path,
+    output_path: &Path,
+) -> anyhow::Result<usize> {
+    use std::collections::HashMap;
+
+    // 读取核心表（全部从 Chs 读，结构各变体一致）
+    let chs_dir = master_data_dir.join("Chs");
+    let card_master: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "CardMaster.json")?;
+    let base_card: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "BaseCardMaster.json")?;
+    let card_text: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "CardText.json")?;
+    let skill_master: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "SkillMaster.json")?;
+
+    // 建立索引
+    let bcm_by_id: HashMap<i64, &Vec<serde_json::Value>> = base_card.iter()
+        .filter_map(|r| r[0].as_i64().map(|id| (id, r)))
+        .collect();
+    let ct_by_cs: HashMap<i64, &Vec<serde_json::Value>> = card_text.iter()
+        .filter_map(|r| r[0].as_i64().map(|id| (id, r)))
+        .collect();
+    let skills_by_cid: HashMap<i64, Vec<&Vec<serde_json::Value>>> = {
+        let mut m: HashMap<i64, Vec<&Vec<serde_json::Value>>> = HashMap::new();
+        for r in &skill_master {
+            if let Some(cid) = r.get(4).and_then(|v| v.as_i64()) {
+                m.entry(cid).or_default().push(r);
+            }
+        }
+        m
+    };
+
+    // 读取 5 语言 MasterTextLabel
+    let langs = ["Chs", "Eng", "Jpn", "Kor", "Cht"];
+    let mut mtl_all: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for lang in &langs {
+        let mtl: Vec<Vec<serde_json::Value>> = read_json_table(
+            &master_data_dir.join(lang), "MasterTextLabel.json"
+        )?;
+        let mut map = HashMap::new();
+        for r in &mtl {
+            let key = r[0].as_str().unwrap_or("").to_string();
+            let val = r[1].as_str().unwrap_or("").to_string();
+            if !key.is_empty() { map.insert(key, val); }
+        }
+        mtl_all.insert(lang.to_string(), map);
+    }
+
+    // 辅助：查找文本
+    let get_text = |lang: &str, key: &str| -> String {
+        mtl_all.get(lang)
+            .and_then(|m| m.get(key))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // 生成 cards_full
+    let mut entries: Vec<CardFullEntry> = Vec::new();
+    for cm in &card_master {
+        let card_id = cm[0].as_i64().unwrap_or(0);
+        if card_id == 0 { continue; }
+
+        let base_card_id = cm[1].as_i64().unwrap_or(card_id);
+        let card_style_id = cm[2].as_i64().unwrap_or(0);
+        let class = cm[3].as_i64().unwrap_or(0);
+        let foil_type = cm[5].as_i64().unwrap_or(0);
+        let is_evolution = foil_type != 0;
+        let evolves_to = cm[7].as_i64().unwrap_or(0);
+        let resource_id = cm[9].as_i64().unwrap_or(0);
+
+        // BaseCardMaster 数据（只有基础形态有）
+        let bcm = bcm_by_id.get(&card_id);
+        let cost = bcm.and_then(|r| serde_json::to_value(&r[4]).ok());
+        let rarity = bcm.and_then(|r| serde_json::to_value(&r[8]).ok());
+        let type_flags = bcm.and_then(|r| serde_json::to_value(&r[1]).ok());
+
+        // 技能
+        let skills: Vec<SkillEntry> = skills_by_cid.get(&card_id)
+            .map(|v| v.iter().map(|r| SkillEntry {
+                skill_id: r[0].as_i64().unwrap_or(0),
+                skill_type: r[1].as_i64().unwrap_or(0),
+                subtype: r[2].as_i64().unwrap_or(0),
+            }).collect())
+            .unwrap_or_default();
+
+        // 文本键：通过 card_style_id 查 CardText
+        let cs_id_for_text = cm[4].as_i64().unwrap_or(card_style_id);
+        let ct = ct_by_cs.get(&cs_id_for_text);
+        let cn_key = ct.and_then(|r| r[1].as_str()).unwrap_or("").to_string();
+        let sd_key = ct.and_then(|r| r[2].as_str()).unwrap_or("").to_string();
+        let ft1_key = ct.and_then(|r| r[3].as_str()).unwrap_or("").to_string();
+        let ft2_key = ct.and_then(|r| r[4].as_str()).unwrap_or("").to_string();
+        let cv_key = ct.and_then(|r| r[5].as_str()).unwrap_or("").to_string();
+
+        // 多语言卡名
+        let name_chs = get_text("Chs", &cn_key);
+        let name_eng = get_text("Eng", &cn_key);
+        let name_jpn = get_text("Jpn", &cn_key);
+        let name_kor = get_text("Kor", &cn_key);
+        let name_cht = get_text("Cht", &cn_key);
+
+        entries.push(CardFullEntry {
+            card_id, base_card_id, card_style_id, class,
+            cost, rarity, type_flags, is_evolution, evolves_to,
+            skills, resource_id,
+            name_chs, name_eng, name_jpn, name_kor, name_cht,
+            text_keys: TextKeys {
+                name: cn_key,
+                skill_desc: sd_key,
+                flavor_1: ft1_key,
+                flavor_2: ft2_key,
+                cv: cv_key,
+            },
+        });
+    }
+
+    let count = entries.len();
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&entries)?;
+    std::fs::write(output_path, json)?;
+    Ok(count)
+}
+
+/// 读取一个已导出的 JSON 表文件
+fn read_json_table(dir: &Path, filename: &str) -> anyhow::Result<Vec<Vec<serde_json::Value>>> {
+    let path = dir.join(filename);
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("无法读取: {}", path.display()))?;
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&content)
+        .with_context(|| format!("JSON 解析失败: {}", path.display()))?;
+    Ok(rows)
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
