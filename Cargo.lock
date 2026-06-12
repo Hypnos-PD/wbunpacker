@@ -1128,6 +1128,7 @@ dependencies = [
  "rmpv",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

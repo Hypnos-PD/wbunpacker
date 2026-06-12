@@ -1,4 +1,5 @@
-/target/
+target/
 data/
 config/Config.local.toml
 .env
+temp/
