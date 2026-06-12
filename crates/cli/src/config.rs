@@ -26,6 +26,9 @@ pub struct AppConfig {
     /// ffmpeg.exe 完整路径（留空则用 PATH 中的 ffmpeg）
     #[serde(default = "default_ffmpeg_path")]
     pub ffmpeg_path: String,
+    /// AssetStudioModCLI.exe 完整路径
+    #[serde(default = "default_asset_studio_path")]
+    pub asset_studio_path: String,
     pub client_id: i64,
     pub sqlite3mc_key: String,
     pub sqlite3mc_base_key: String,
@@ -41,6 +44,10 @@ fn default_vgmstream_path() -> String {
 
 fn default_ffmpeg_path() -> String {
     "ffmpeg".into()
+}
+
+fn default_asset_studio_path() -> String {
+    r"D:\Tools\AssetStudioModCLI_net9_win64\AssetStudioModCLI.exe".into()
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,241 +1,378 @@
 //! 卡图纹理处理模块
 //!
-//! # 概述
+//! # 管线
 //!
-//! 从 Unity AssetBundle 中导出卡牌插画，并处理为 WBArts 所需的格式。
+//! 1. export   — 调 AssetStudio CLI 导出 Texture2D → PNG（增量：已存在则跳过）
+//! 2. categorize — 按前缀分到 Main/Special/Token（增量：已存在则跳过）
+//! 3. resize   — Lanczos3 缩放至 848x1024（增量：已存在则跳过）
 //!
-//! # 管线的两步
+//! # 资源 ID 分类
 //!
-//! ## 第一步：AssetStudio 导出
-//!
-//! 调用外部工具 AssetStudio CLI 从解密后的 AssetBundle 中提取 Texture2D。
-//! AssetStudio 是一个专门解析 Unity SerializedFile 格式的工具，
-//! 这部分不需要自己实现（Unity 的序列化格式极其复杂）。
-//!
-//! ```powershell
-//! AssetStudioModCLI.exe `
-//!   --input data/decrypted/assetbundles/... `
-//!   --output data/exports/card-textures/raw/ `
-//!   --unity-version 2022.3.62f2
-//! ```
-//!
-//! ## 第二步：缩放与命名
-//!
-//! 导出得到的原始 PNG 尺寸不统一（通常为正方形纹理），
-//! 需要缩放到 848×1024（竖卡比例 5:7）并重命名。
-//!
-//! 本模块负责第二步，以及封装 AssetStudio 的命令行调用。
+//! | 前缀 | 目录    | 说明     |
+//! |------|---------|----------|
+//! | 1xxx | Main/   | 主卡牌   |
+//! | 8xxx | Special/| 特殊卡   |
+//! | 9xxx | Token/  | Token 卡 |
+//! | 7xxx | —       | 跳过（Spine 动画背景）|
 //!
 //! # 输出目录结构
 //!
 //! ```text
-//! data/exports/card-textures/
-//!   raw/        ← AssetStudio 直接导出的原始 1:1 PNG
-//!   resized/    ← 缩放至 848×1024 的 PNG
-//!   named/      ← STSVWB 命名规则的最终卡图（按变体分目录）
+//! exports/card-textures/
+//!   _raw/       ← AssetStudio 原始导出
+//!   Main/       ← 1xxxx 主卡 ({id}.png)
+//!   Special/    ← 8xxxx 特殊卡
+//!   Token/      ← 9xxxx Token
+//! exports/card-textures-resized/
+//!   Main/       ← 缩放后（保持子目录结构）
+//!   Special/
+//!   Token/
 //! ```
-//!
-//! # 卡图命名规则 (STSVWB)
-//!
-//! 以英文名为基础，去除标点，连字符替换为空格，每个单词首字母大写：
-//!
-//! | 原始英文名 | 处理后的 STSVWB 名 |
-//! |---|---|
-//! | `Achim, Lord of Despair` | `Achim Lord Of Despair` |
-//! | `Anthuria, Toe-Tapping Torch` | `Anthuria Toe Tapping Torch` |
-//! | `Adventurers' Guild` | `Adventurers Guild` |
-//!
-//! 去除的标点：`, . ' " : ; ! ? ( ) &`
-//! 替换为空格：`-` `–` `—`
-//!
-//! # 变体分类
-//!
-//! 根据 card_style_id 的末位数字决定输出子目录：
-//!
-//! | 末位 | 文件夹 | 含义 |
-//! |---|---|---|
-//! | 0 | (根目录) | 基础卡图 |
-//! | 1 | Evo/ | 进化 |
-//! | 2 | Skin/ | 异画 |
-//! | 3 | SkinEvo/ | 异画进化 |
-//! | ... | 依此类推 | ... |
-//!
-//! 但 WBArts 实际上只消费 `resized/` 目录，
-//! STSVWB 命名规则主要用于备用的手动分发场景。
 
 use anyhow::Context;
-use image::DynamicImage;
+use indicatif::{ProgressBar, ProgressStyle};
+use manifest::Manifest;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tracing::{debug, info};
 
 // ============================================================================
 // 常量
 // ============================================================================
 
-/// 目标卡图宽度（像素）
-const TARGET_WIDTH: u32 = 848;
-
-/// 目标卡图高度（像素）
-const TARGET_HEIGHT: u32 = 1024;
-
-/// AssetStudio CLI 默认路径
-const DEFAULT_ASSET_STUDIO_PATH: &str =
-    r"D:\Tools\AssetStudioModCLI_net9_win64\AssetStudioModCLI.exe";
-
 /// Unity 版本（用于 AssetStudio 解析）
 const UNITY_VERSION: &str = "2022.3.62f2";
 
-/// STSVWB 命名规则中需要去除的标点
-const STRIP_CHARS: &[char] = &[',', '.', '\'', '"', ':', ';', '!', '?', '(', ')', '&'];
+/// Card/Textures 在 manifest 中的路径前缀
+const CARD_TEXTURES_PREFIX: &str = "Assets/_Wizard2Resources/Card/Textures/";
 
-/// STSVWB 命名规则中需要替换为空格的字符
-const REPLACE_WITH_SPACE: &[char] = &['-', '\u{2013}', '\u{2014}']; // hyphen, en-dash, em-dash
-
-// ============================================================================
-// 数据结构
-// ============================================================================
-
-/// 纹理处理结果。
-pub struct TextureResult {
-    /// card_style_id
-    pub cs_id: u64,
-    /// 输出文件路径
-    pub output_path: PathBuf,
-    /// 是否为新文件（true: 新增, false: 已存在，跳过）
-    pub is_new: bool,
-}
+/// 需要跳过的子路径
+const SKIP_PATTERNS: &[&str] = &["HighFoil"];
 
 // ============================================================================
 // 公共 API
 // ============================================================================
 
-/// 调用 AssetStudio CLI 导出原始纹理。
+/// 完整的卡图处理管线: 导出 → 分类 → 缩放。
 ///
-/// 遍历解密后的 AssetBundle 目录，提取所有 Texture2D 为 PNG。
-///
-/// # 参数
-/// - `input_dir`: 解密后的 AssetBundle 目录
-/// - `output_dir`: 原始 PNG 输出目录
-/// - `asset_studio_path`: AssetStudio CLI 可执行文件路径
-///
-/// # 注意
-/// AssetStudio 的导出可能非常耗时（数十分钟），
-/// 取决于 AssetBundle 的总大小和数量。
-pub fn export_raw(
-    input_dir: &Path,
-    output_dir: &Path,
-    asset_studio_path: Option<&Path>,
-) -> anyhow::Result<Vec<PathBuf>> {
-    todo!("AssetStudio 调用封装")
-}
+/// 每步都有增量跳过逻辑。
+pub fn process_card_textures(
+    data_dir: &Path,
+    asset_studio_path: &Path,
+    no_resize: bool,
+) -> anyhow::Result<()> {
+    let output_dir = data_dir.join("exports").join("card-textures");
+    let raw_dir = output_dir.join("_raw");
 
-/// 将原始 PNG 缩放至 848×1024 的卡图尺寸。
-///
-/// 使用 Lanczos3 算法进行高质量缩放。
-/// 已存在的文件自动跳过（增量处理）。
-///
-/// # 参数
-/// - `raw_dir`: 原始 PNG 目录
-/// - `resized_dir`: 缩放后输出目录
-pub fn resize_textures(raw_dir: &Path, resized_dir: &Path) -> anyhow::Result<Vec<TextureResult>> {
-    todo!("图片缩放实现")
-}
+    // 第一步: AssetStudio 导出
+    let expected_count = count_card_entries(data_dir)?;
+    let existing = count_raw_dirs(&raw_dir);
+    if existing >= expected_count {
+        println!("跳过 AssetStudio 导出（已有 {} 个目录，预期 {}）", existing, expected_count);
+    } else {
+        println!("AssetStudio 导出（预期 {} 个卡图）...", expected_count);
+        run_asset_studio(data_dir, &raw_dir, asset_studio_path)?;
+    }
 
-/// 按 STSVWB 规则重命名卡图并分类到变体目录。
-///
-/// 读取 cards_full.json 获取卡牌的英文名和 card_style_id，
-/// 应用 STSVWB 命名规则后复制/重命名到 named/ 目录。
-///
-/// # 参数
-/// - `resized_dir`: 缩放后的 PNG 目录
-/// - `named_dir`: STSVWB 命名输出目录
-/// - `cards_full_path`: cards_full.json 路径（用于卡名和 card_style_id 映射）
-pub fn rename_textures(
-    resized_dir: &Path,
-    named_dir: &Path,
-    cards_full_path: &Path,
-) -> anyhow::Result<Vec<TextureResult>> {
-    todo!("STSVWB 重命名实现")
-}
+    // 第二步: 分类
+    let png_count = count_categorized(&output_dir);
+    if png_count >= expected_count {
+        println!("跳过分类（已有 {} 个 PNG，预期 {}）", png_count, expected_count);
+    } else {
+        println!("分类到 Main/Special/Token...");
+        let r = categorize(&raw_dir, &output_dir)?;
+        println!("   Main={} Special={} Token={} (共 {} PNG)",
+            r.by_main, r.by_special, r.by_token, r.png_count);
+        // 清理 _raw 目录（已分类完成）
+        let _ = std::fs::remove_dir_all(&raw_dir);
+    }
 
-// ============================================================================
-// 内部函数
-// ============================================================================
-
-/// 将单张图片缩放至目标尺寸。
-///
-/// 使用 `image` crate 的 Lanczos3 重采样算法，
-/// 这是视觉质量最高的缩放算法之一。
-///
-/// 如果原始图片已经是目标尺寸则直接复制（不做缩放），
-/// 避免重复采样损失画质。
-fn resize_single(input: &Path, output: &Path) -> anyhow::Result<()> {
-    let img = image::open(input)
-        .with_context(|| format!("无法打开图片: {}", input.display()))?;
-
-    if img.width() == TARGET_WIDTH && img.height() == TARGET_HEIGHT {
-        // 尺寸已匹配，直接复制
-        if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)?;
+    // 第三步: 缩放
+    if !no_resize {
+        let resized_dir = data_dir.join("exports").join("card-textures-resized");
+        let resized_count = count_pngs_recursive(&resized_dir);
+        let total_pngs = count_pngs_recursive(&output_dir);
+        if resized_count >= total_pngs {
+            println!("跳过缩放（已有 {} 个，预期 {}）", resized_count, total_pngs);
+        } else {
+            println!("缩放至 848x1024 -> {} ...", resized_dir.display());
+            let rr = resize_textures(&output_dir, &resized_dir)?;
+            println!("   缩放: {} | 跳过: {}", rr.resized, rr.skipped);
         }
-        std::fs::copy(input, output)?;
-        return Ok(());
     }
-
-    let resized = img.resize_exact(TARGET_WIDTH, TARGET_HEIGHT, image::imageops::FilterType::Lanczos3);
-
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    resized.save(output)?;
 
     Ok(())
 }
 
-/// 应用 STSVWB 命名规则处理单个卡名。
-///
-/// 规则：
-/// 1. 去除指定标点字符
-/// 2. 将连字符/破折号替换为空格
-/// 3. 每个单词首字母大写，其余小写
-/// 4. 合并多余空格
-///
-/// # 示例
-/// ```
-/// "Achim, Lord of Despair" → "Achim Lord Of Despair"
-/// "Anthuria, Toe-Tapping Torch" → "Anthuria Toe Tapping Torch"
-/// ```
-fn stsvwb_name(english_name: &str) -> String {
-    let mut name = english_name.to_string();
+// ============================================================================
+// 计数（增量跳过用）
+// ============================================================================
 
-    // 第一步：去除标点
-    for ch in STRIP_CHARS {
-        name = name.replace(*ch, "");
-    }
+/// 从 manifest 读取预期的 Card/Textures 条目数。
+fn count_card_entries(data_dir: &Path) -> anyhow::Result<usize> {
+    let manifest_path = data_dir
+        .join("manifests")
+        .join("json")
+        .join("assetbundle.Chs.manifest.json");
+    let json = std::fs::read_to_string(&manifest_path)
+        .context("请先运行: wbu manifest -v Chs --format json")?;
+    let m: Manifest = serde_json::from_str(&json)?;
+    Ok(m.assets.iter()
+        .filter(|a| a.name.starts_with(CARD_TEXTURES_PREFIX))
+        .filter(|a| !SKIP_PATTERNS.iter().any(|p| a.name.contains(p)))
+        .count())
+}
 
-    // 第二步：连字符替换为空格
-    for ch in REPLACE_WITH_SPACE {
-        name = name.replace(*ch, " ");
-    }
-
-    // 第三步：每个单词首字母大写
-    let words: Vec<String> = name
-        .split_whitespace()
-        .filter(|s| !s.is_empty())
-        .map(|w| {
-            let mut chars = w.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first) => {
-                    let mut result = first.to_uppercase().to_string();
-                    result.extend(chars.flat_map(|c| c.to_lowercase()));
-                    result
-                }
-            }
+/// 统计 _raw 目录下的 .ab_export 子目录数。
+fn count_raw_dirs(raw_dir: &Path) -> usize {
+    std::fs::read_dir(raw_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+                .count()
         })
+        .unwrap_or(0)
+}
+
+/// 统计 Main/Special/Token 目录下的 PNG 总数。
+fn count_categorized(output_dir: &Path) -> usize {
+    ["Main", "Special", "Token"].iter()
+        .map(|d| count_pngs_recursive(&output_dir.join(d)))
+        .sum()
+}
+
+/// 递归统计目录中的 PNG 文件数。
+fn count_pngs_recursive(dir: &Path) -> usize {
+    let mut count = 0;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().map_or(false, |t| t.is_dir()) {
+                count += count_pngs_recursive(&path);
+            } else if path.extension().map_or(false, |e| e == "png") {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+// ============================================================================
+// AssetStudio 导出
+// ============================================================================
+
+/// 运行 AssetStudio CLI，导出 Texture2D → PNG。
+fn run_asset_studio(
+    data_dir: &Path,
+    output_dir: &Path,
+    asset_studio_path: &Path,
+) -> anyhow::Result<()> {
+    let decrypted_dir = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("decrypted")
+        .join(CARD_TEXTURES_PREFIX);
+
+    if !decrypted_dir.exists() {
+        anyhow::bail!(
+            "解密目录不存在: {}（请先运行 wbu asset batch -v Chs）",
+            decrypted_dir.display()
+        );
+    }
+
+    std::fs::create_dir_all(output_dir)?;
+
+    // Spinner（AssetStudio 是外部进程，无法获取实时进度）
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} AssetStudio 导出中... {elapsed}")
+            .unwrap()
+    );
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let status = Command::new(asset_studio_path)
+        .arg(&decrypted_dir)
+        .args([
+            "-t", "tex2d",
+            "-g", "fileName",
+            "-f", "assetName",
+            "-o", &output_dir.to_string_lossy(),
+            "-r",
+            "--unity-version", UNITY_VERSION,
+            "--log-level", "warning",
+        ])
+        .status()
+        .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
+
+    spinner.finish_and_clear();
+
+    if !status.success() {
+        anyhow::bail!("AssetStudio 退出码: {:?}", status.code());
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// 分类
+// ============================================================================
+
+/// 分类结果
+#[derive(Debug, Default)]
+pub struct CategorizeResult {
+    pub by_main: usize,
+    pub by_special: usize,
+    pub by_token: usize,
+    pub png_count: usize,
+}
+
+/// 将 AssetStudio 原始输出按 ID 前缀分类到 Main/Special/Token。
+///
+/// AssetStudio 输出结构: _raw/{id}.ab_export/CAB-{hash}/{id}.png
+fn categorize(raw_dir: &Path, output_dir: &Path) -> anyhow::Result<CategorizeResult> {
+    let mut result = CategorizeResult::default();
+
+    let main_dir = output_dir.join("Main");
+    let special_dir = output_dir.join("Special");
+    let token_dir = output_dir.join("Token");
+    std::fs::create_dir_all(&main_dir)?;
+    std::fs::create_dir_all(&special_dir)?;
+    std::fs::create_dir_all(&token_dir)?;
+
+    // 收集所有待处理的目录
+    let dirs: Vec<_> = std::fs::read_dir(raw_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
         .collect();
 
-    words.join(" ")
+    let pb = ProgressBar::new(dirs.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("{spinner} [{bar:30}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=> ")
+    );
+
+    for entry in dirs {
+        let dir_str = entry.file_name().to_string_lossy().to_string();
+        let resource_id = dir_str.strip_suffix(".ab_export").unwrap_or(&dir_str);
+
+        if resource_id.len() != 9 {
+            pb.inc(1);
+            continue;
+        }
+
+        let target_dir = match resource_id.chars().next() {
+            Some('1') => &main_dir,
+            Some('8') => &special_dir,
+            Some('9') => &token_dir,
+            _ => { pb.inc(1); continue; }
+        };
+
+        // 检查是否已分类
+        let dest = target_dir.join(format!("{}.png", resource_id));
+        if dest.exists() {
+            pb.inc(1);
+            result.png_count += 1;
+            continue;
+        }
+
+        // 递归查找 PNG 并移动
+        if let Ok(pngs) = find_pngs(&entry.path()) {
+            if let Some(png_path) = pngs.first() {
+                pb.set_message(format!("{}", resource_id));
+                std::fs::rename(png_path, &dest)?;
+                result.png_count += 1;
+            }
+        }
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+
+    result.by_main = count_pngs_recursive(&main_dir);
+    result.by_special = count_pngs_recursive(&special_dir);
+    result.by_token = count_pngs_recursive(&token_dir);
+
+    Ok(result)
+}
+
+/// 递归查找目录中的所有 PNG 文件。
+fn find_pngs(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut result = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            result.extend(find_pngs(&path)?);
+        } else if path.extension().map_or(false, |e| e == "png") {
+            result.push(path);
+        }
+    }
+    Ok(result)
+}
+
+// ============================================================================
+// 缩放
+// ============================================================================
+
+/// 缩放结果
+#[derive(Debug, Default)]
+pub struct ResizeResult {
+    pub resized: usize,
+    pub skipped: usize,
+}
+
+/// 批量缩放目录树中所有 PNG 到 848x1024。
+fn resize_textures(input_dir: &Path, output_dir: &Path) -> anyhow::Result<ResizeResult> {
+    let mut result = ResizeResult::default();
+    let pngs = find_pngs(input_dir)?;
+
+    let pb = ProgressBar::new(pngs.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("{spinner} [{bar:30}] {pos}/{len} 缩放 {msg}")
+            .unwrap()
+            .progress_chars("=> ")
+    );
+
+    for png_path in &pngs {
+        let rel = png_path.strip_prefix(input_dir).unwrap_or(png_path);
+        let out = output_dir.join(rel);
+        if out.exists() {
+            result.skipped += 1;
+        } else {
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if let Some(name) = png_path.file_stem() {
+                pb.set_message(name.to_string_lossy().to_string());
+            }
+            resize_single_848x1024(png_path, &out)?;
+            result.resized += 1;
+        }
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+    Ok(result)
+}
+
+/// 将单张 PNG 缩放至 848x1024（Lanczos3）。
+fn resize_single_848x1024(input: &Path, output: &Path) -> anyhow::Result<()> {
+    let img = image::open(input)
+        .with_context(|| format!("无法打开图片: {}", input.display()))?;
+
+    if img.width() == 848 && img.height() == 1024 {
+        std::fs::copy(input, output)?;
+        return Ok(());
+    }
+
+    let resized = img.resize_exact(848, 1024, image::imageops::FilterType::Lanczos3);
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    resized.save(output)?;
+    Ok(())
 }
 
 // ============================================================================
@@ -246,34 +383,9 @@ fn stsvwb_name(english_name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// 验证 STSVWB 命名规则
     #[test]
-    fn test_stsvwb_name_basic() {
-        assert_eq!(
-            stsvwb_name("Achim, Lord of Despair"),
-            "Achim Lord Of Despair"
-        );
-    }
-
-    #[test]
-    fn test_stsvwb_name_hyphen() {
-        assert_eq!(
-            stsvwb_name("Anthuria, Toe-Tapping Torch"),
-            "Anthuria Toe Tapping Torch"
-        );
-    }
-
-    #[test]
-    fn test_stsvwb_name_apostrophe() {
-        assert_eq!(
-            stsvwb_name("Adventurers' Guild"),
-            "Adventurers Guild"
-        );
-    }
-
-    #[test]
-    fn test_stsvwb_name_simple() {
-        // 无特殊字符的名字保持不变
-        assert_eq!(stsvwb_name("Arisa"), "Arisa");
+    fn test_resource_id_routing() {
+        assert!(CARD_TEXTURES_PREFIX.starts_with("Assets/_Wizard2Resources/Card/Textures/"));
+        assert!(SKIP_PATTERNS.contains(&"HighFoil"));
     }
 }

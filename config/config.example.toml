@@ -46,3 +46,6 @@ platform_os_version = ""
 gpu_vendor = ""
 graphics_memory_mb = ""
 processor_type = ""
+
+# AssetStudioModCLI 路径
+asset_studio_path = "D:/Tools/AssetStudioModCLI_net9_win64/AssetStudioModCLI.exe"

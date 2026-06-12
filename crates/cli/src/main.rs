@@ -55,11 +55,10 @@ enum Command {
         #[arg(long)]
         mp3: bool,
     },
-
-    /// 处理卡图纹理 (骨架)
+    /// 纹理处理
     Texture {
-        #[arg(long)]
-        asset_studio: Option<String>,
+        #[command(subcommand)]
+        sub: TextureCmd,
     },
 
     /// 解密客户端 meta.db (骨架)
@@ -87,6 +86,19 @@ enum AssetCmd {
 // ============================================================================
 // 常量
 // ============================================================================
+
+#[derive(Subcommand)]
+enum TextureCmd {
+    /// 导出卡图纹理: AssetStudio 导出 → 按前缀分类 → 缩放至 848×1024
+    Card {
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+        /// 跳过缩放步骤（默认会缩放至 848×1024）
+        #[arg(long)]
+        no_resize: bool,
+    },
+}
 
 const ALL_VARIANTS: &[&str] = &["Chs", "Eng", "Jpn", "Kor", "Cht"];
 const MASTER_BYTES_NAME: &str = "Master/mastermemory.bytes";
@@ -288,10 +300,21 @@ async fn main() -> anyhow::Result<()> {
                 println!("MP3 完成: {n} 个文件");
             }
         }
-        Command::Texture { .. } => todo!("texture"),
+        Command::Texture { sub } => match sub {
+            TextureCmd::Card { asset_studio, no_resize } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                texture::process_card_textures(data_dir, &as_path, no_resize)?;
+            }
+        }
         Command::Metadb { .. } => todo!("metadb"),
         Command::Localize { .. } => todo!("localize"),
     }
 
     Ok(())
+
 }
