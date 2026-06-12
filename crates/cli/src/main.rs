@@ -91,6 +91,8 @@ enum AssetCmd {
 enum MasterCmd {
     /// 生成 cards_full.json：合并 CardMaster + BaseCardMaster + SkillMaster + 5语言卡名
     Cards,
+    /// 生成 pack_names.json：从多语言 MasterTextLabel 提取卡包名称
+    Packs,
 }
 
 #[derive(Subcommand)]
@@ -109,6 +111,12 @@ enum TextureCmd {
         /// 跳过缩放步骤（默认会缩放至 848×1024）
         #[arg(long)]
         no_resize: bool,
+    },
+    /// 提取 PackIcons 图标: 从 IconItem AssetBundle 提取所有 pack-icons 图标（hash增量跳过）
+    PackIcons {
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
     },
 }
 
@@ -249,6 +257,26 @@ async fn main() -> anyhow::Result<()> {
             let data_dir = std::path::Path::new(&cfg.data_dir);
 
             match sub {
+                Some(MasterCmd::Packs) => {
+                    let master_data_dir = data_dir.join("exports").join("master-data");
+                    let output_path = data_dir.join("exports").join("analysis").join("pack_names.json");
+                    println!("生成 pack_names.json...");
+                    let packs = master_data::generate_pack_names(&master_data_dir)?;
+                    let json = serde_json::to_string_pretty(&packs)?;
+                    std::fs::create_dir_all(output_path.parent().unwrap())?;
+                    std::fs::write(&output_path, json)?;
+                    println!("完成: {} 个卡包 => {}", packs.len(), output_path.display());
+                }
+                Some(MasterCmd::Packs) => {
+                    let master_data_dir = data_dir.join("exports").join("master-data");
+                    let output_path = data_dir.join("exports").join("analysis").join("pack_names.json");
+                    println!("生成 pack_names.json...");
+                    let packs = master_data::generate_pack_names(&master_data_dir)?;
+                    let json = serde_json::to_string_pretty(&packs)?;
+                    std::fs::create_dir_all(output_path.parent().unwrap())?;
+                    std::fs::write(&output_path, json)?;
+                    println!("完成: {} 个卡包 => {}", packs.len(), output_path.display());
+                }
                 Some(MasterCmd::Cards) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
                     let output_path = data_dir.join("exports").join("analysis").join("cards_full.json");
@@ -368,6 +396,15 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_card_textures(data_dir, &as_path, no_resize)?;
+            }
+            TextureCmd::PackIcons { asset_studio } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                texture::process_pack_icons(data_dir, &as_path)?;
             }
         },
         Command::Metadb { .. } => todo!("metadb"),

@@ -13,4 +13,5 @@ tracing = "0.1"
 manifest = { path = "../manifest" }
 tempfile = "3"
 walkdir = "2"
+sha2 = "0.10"
 indicatif = "0.17"

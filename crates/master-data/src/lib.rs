@@ -394,6 +394,53 @@ fn read_json_table(dir: &Path, filename: &str) -> anyhow::Result<Vec<Vec<serde_j
 }
 
 // ---------------------------------------------------------------------------
+// pack_names.json 生成
+// ---------------------------------------------------------------------------
+
+/// 从多语言 MasterTextLabel 中提取卡包名称。
+pub fn generate_pack_names(
+    master_data_dir: &Path,
+) -> anyhow::Result<std::collections::BTreeMap<String, serde_json::Value>> {
+    let langs = ["Chs", "Eng", "Jpn", "Kor", "Cht"];
+    let mut pack_names: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+
+    for lang in &langs {
+        let mtl: Vec<Vec<serde_json::Value>> =
+            read_json_table(&master_data_dir.join(lang), "MasterTextLabel.json")?;
+        let lang_key = match *lang {
+            "Chs" => "chs",
+            "Eng" => "eng",
+            "Jpn" => "jpn",
+            "Kor" => "kor",
+            "Cht" => "cht",
+            _ => continue,
+        };
+
+        for r in &mtl {
+            let key = r[0].as_str().unwrap_or("");
+            let val = r[1].as_str().unwrap_or("");
+
+            if let Some(pack_id) = key.strip_prefix("CPN_") {
+                if let Ok(id_num) = pack_id.parse::<u32>() {
+                    if id_num >= 10000 && id_num <= 10007 {
+                        let entry = pack_names
+                            .entry(pack_id.to_string())
+                            .or_insert_with(|| serde_json::json!({}));
+                        if let Some(obj) = entry.as_object_mut() {
+                            let clean = val.split('[').next().unwrap_or(val).trim().to_string();
+                            obj.insert(lang_key.to_string(), serde_json::Value::String(clean));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(pack_names)
+}
+
+// ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
 

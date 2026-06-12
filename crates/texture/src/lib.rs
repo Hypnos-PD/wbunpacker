@@ -17,7 +17,7 @@
 //!
 //! # 输出目录结构
 //!
-//! ```text
+//! `text
 //! exports/card-textures/
 //!   _raw/       ← AssetStudio 原始导出
 //!   Main/       ← 1xxxx 主卡 ({id}.png)
@@ -27,7 +27,7 @@
 //!   Main/       ← 缩放后（保持子目录结构）
 //!   Special/
 //!   Token/
-//! ```
+//! `
 
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -48,6 +48,7 @@ const CARD_TEXTURES_PREFIX: &str = "Assets/_Wizard2Resources/Card/Textures/";
 
 /// 需要跳过的子路径
 const SKIP_PATTERNS: &[&str] = &["HighFoil"];
+
 
 // ============================================================================
 // 公共 API
@@ -102,6 +103,16 @@ pub fn process_card_textures(
     }
 
     Ok(())
+}
+
+/// 提取卡包UI图标: 从解密 AssetBundle 中提取 utx_ic_item_10000~10007 → PNG。
+///
+/// 增量: 已存在的 PNG 跳过。
+pub fn process_pack_icons(
+    data_dir: &Path,
+    asset_studio_path: &Path,
+) -> anyhow::Result<()> {
+    extract_pack_icons(data_dir, asset_studio_path)
 }
 
 // ============================================================================
@@ -372,6 +383,231 @@ fn resize_single_848x1024(input: &Path, output: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     resized.save(output)?;
+    Ok(())
+}
+
+// ============================================================================
+// pack-icons 图标提取
+// ============================================================================
+
+/// 从解密 AssetBundle 中提取卡包 pack-icons 图标。
+///
+/// 源: variants/Chs/decrypted/UI/IconItem/utx_ic_item_{id}.ab
+/// 输出: exports/pack-icons/{id}.png
+///
+/// 增量: 已存在的 PNG 跳过。
+fn extract_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
+    use sha2::Digest;
+    use std::collections::BTreeMap;
+    use std::io::Read;
+
+    let icon_source_dir = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("decrypted")
+        .join("UI")
+        .join("IconItem");
+
+    if !icon_source_dir.exists() {
+        anyhow::bail!(
+            "图标源目录不存在: {}（请先运行 wbu asset batch -v Chs）",
+            icon_source_dir.display()
+        );
+    }
+
+    let output_dir = data_dir.join("exports").join("pack-icons");
+    std::fs::create_dir_all(&output_dir)?;
+
+    // 加载哈希缓存文件（id → sha256）
+    let hash_cache_path = output_dir.join(".hashes.json");
+    let mut hash_cache: BTreeMap<String, String> = if hash_cache_path.exists() {
+        let raw = std::fs::read_to_string(&hash_cache_path)?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+
+    // 动态扫描卡包图标: utx_ic_item_100\d{2}.ab（如 10000~10008）
+    let icon_bundles: Vec<_> = std::fs::read_dir(&icon_source_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            // 卡包图标格式: utx_ic_item_100 + 两位数字 + .ab
+            name.starts_with("utx_ic_item_100")
+                && name.ends_with(".ab")
+                && name.len() == "utx_ic_item_10000.ab".len()
+        })
+        .collect();
+
+    if icon_bundles.is_empty() {
+        println!("UI/IconItem 目录为空，跳过");
+        return Ok(());
+    }
+
+    // 检查增量: 对每个 bundle 计算 SHA256，与缓存比较
+    let mut stale_ids: Vec<String> = Vec::new();
+    let mut current_hashes: BTreeMap<String, String> = BTreeMap::new();
+
+    for entry in &icon_bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("utx_ic_item_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name)
+            .to_string();
+
+        // 计算源 bundle 的 SHA256
+        let mut file = std::fs::File::open(entry.path())?;
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let hash = format!("{:x}", hasher.finalize());
+
+        current_hashes.insert(id.clone(), hash.clone());
+
+        // 检查: PNG 是否存在 且 哈希与缓存一致
+        let png_path = output_dir.join(format!("{}.png", &id));
+        if !png_path.exists() {
+            stale_ids.push(id);
+        } else if hash_cache.get(&id) != Some(&hash) {
+            // 哈希变了 → 源文件更新 → 需要重新提取
+            stale_ids.push(id);
+        }
+    }
+
+    if stale_ids.is_empty() {
+        println!(
+            "pack-icons 图标全部为最新（{} 个），跳过",
+            icon_bundles.len()
+        );
+        // 更新哈希缓存（可能有新增的条目）
+        let json = serde_json::to_string_pretty(&current_hashes)?;
+        std::fs::write(&hash_cache_path, json)?;
+        return Ok(());
+    }
+
+    println!(
+        "需要更新 {} 个图标（共 {} 个，{} 个已是最新）",
+        stale_ids.len(),
+        icon_bundles.len(),
+        icon_bundles.len() - stale_ids.len()
+    );
+
+    // 创建临时工作目录
+    let temp_input = data_dir
+        .join("exports")
+        .join("pack-icons")
+        .join(".temp_input");
+    let temp_output = data_dir
+        .join("exports")
+        .join("pack-icons")
+        .join(".temp_output");
+
+    // 清理旧临时目录
+    if temp_input.exists() {
+        std::fs::remove_dir_all(&temp_input)?;
+    }
+    if temp_output.exists() {
+        std::fs::remove_dir_all(&temp_output)?;
+    }
+    std::fs::create_dir_all(&temp_input)?;
+    std::fs::create_dir_all(&temp_output)?;
+
+    // 只复制需要更新的 bundle
+    for entry in &icon_bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("utx_ic_item_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name);
+        if stale_ids.contains(&id.to_string()) {
+            let src = entry.path();
+            let dst = temp_input.join(entry.file_name());
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+
+    // 运行 AssetStudio
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} AssetStudio 导出中... {elapsed}")
+            .unwrap(),
+    );
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let status = Command::new(asset_studio_path)
+        .arg(&temp_input)
+        .args([
+            "-t",
+            "tex2d",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName",
+            "-o",
+            &temp_output.to_string_lossy(),
+            "--unity-version",
+            UNITY_VERSION,
+            "--log-level",
+            "warning",
+        ])
+        .status()
+        .with_context(|| {
+            format!("无法启动 AssetStudio: {}", asset_studio_path.display())
+        })?;
+
+    spinner.finish_and_clear();
+
+    if !status.success() {
+        anyhow::bail!("AssetStudio 退出码: {:?}", status.code());
+    }
+
+    // 从 AssetStudio 输出中收集 PNG
+    for entry in &icon_bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("utx_ic_item_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name);
+
+        if !stale_ids.contains(&id.to_string()) {
+            continue; // 未变化，跳过
+        }
+
+        let dest = output_dir.join(format!("{}.png", id));
+
+        // AssetStudio 输出: .temp_output/{bundle_name}.ab_export/CAB-{hash}/{texture_name}.png
+        let export_dir = temp_output.join(format!("{}_export", name));
+        if let Ok(pngs) = find_pngs(&export_dir) {
+            if let Some(png_path) = pngs.first() {
+                std::fs::rename(png_path, &dest)?;
+                debug!("pack-icons 图标更新: {} → {}", id, dest.display());
+            }
+        }
+    }
+
+    // 清理临时目录
+    let _ = std::fs::remove_dir_all(&temp_input);
+    let _ = std::fs::remove_dir_all(&temp_output);
+
+    // 更新哈希缓存
+    let json = serde_json::to_string_pretty(&current_hashes)?;
+    std::fs::write(&hash_cache_path, json)?;
+
+    println!(
+        "pack-icons 图标提取完成: 更新 {} 个",
+        stale_ids.len()
+    );
+
     Ok(())
 }
 
