@@ -426,6 +426,9 @@ fn collect_hirc_mappings(
 
     let mut pos = hirc_off + 12;
 
+    let mut cnt02 = 0u32; let mut cnt03 = 0u32; let mut cnt04 = 0u32;
+    let mut cnt02ok = 0u32; let mut cnt03ok = 0u32; let mut cnt04ok = 0u32;
+
     for _ in 0..count {
         if pos + 9 > bank_data.len() {
             break;

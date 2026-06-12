@@ -274,9 +274,7 @@ pub fn extract_all(
         if n > 0 {
             file_list.push(pck_path);
         }
-        if (i + 1) % 50 == 0 || i == pck_files.len() - 1 {
-            tracing::info!("  已扫描 {}/{} 个 pck, 累计 {} WEM", i + 1, pck_files.len(), total_wem);
-        }
+        // silence - single summary at end
     }
 
     let pb = ProgressBar::new(total_wem as u64);
