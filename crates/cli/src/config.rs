@@ -20,6 +20,12 @@ pub struct AppConfig {
     pub device_uuid: String,
     pub md5_salt: String,
     pub asset_bundle_base_keys: String,
+    /// vgmstream-cli.exe 完整路径
+    #[serde(default = "default_vgmstream_path")]
+    pub vgmstream_path: String,
+    /// ffmpeg.exe 完整路径（留空则用 PATH 中的 ffmpeg）
+    #[serde(default = "default_ffmpeg_path")]
+    pub ffmpeg_path: String,
     pub client_id: i64,
     pub sqlite3mc_key: String,
     pub sqlite3mc_base_key: String,
@@ -27,6 +33,14 @@ pub struct AppConfig {
 
 fn default_data_dir() -> String {
     "data".into()
+}
+
+fn default_vgmstream_path() -> String {
+    r"D:\Tools\vgmstream-win64\vgmstream-cli.exe".into()
+}
+
+fn default_ffmpeg_path() -> String {
+    "ffmpeg".into()
 }
 
 #[derive(Debug, Deserialize)]

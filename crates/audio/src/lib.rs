@@ -30,7 +30,6 @@ use anyhow::Context;
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
 
 pub mod wwise;
 
@@ -190,8 +189,8 @@ pub fn wem_to_wav(
 }
 
 /// 调用 ffmpeg 将 WAV 转码为 MP3。
-pub fn wav_to_mp3(wav_path: &Path, mp3_path: &Path) -> anyhow::Result<()> {
-    let status = std::process::Command::new("ffmpeg")
+pub fn wav_to_mp3(wav_path: &Path, mp3_path: &Path, ffmpeg_path: &str) -> anyhow::Result<()> {
+    let status = std::process::Command::new(ffmpeg_path)
         .args([
             "-y",
             "-i",
@@ -239,6 +238,7 @@ pub fn extract_all(
     output_dir: &Path,
     event_map: &std::collections::BTreeMap<u32, String>,
     vgmstream_path: &Path,
+    ffmpeg_path: &str,
 ) -> anyhow::Result<AudioExtractStats> {
     std::fs::create_dir_all(output_dir)?;
     let unmapped_dir = output_dir.join("_unmapped");
@@ -302,7 +302,7 @@ pub fn extract_all(
             }
 
             // WAV → MP3
-            match wav_to_mp3(&wav_tmp, &out_path) {
+            match wav_to_mp3(&wav_tmp, &out_path, ffmpeg_path) {
                 Ok(()) => {
                     stats.wem_converted += 1;
                 }

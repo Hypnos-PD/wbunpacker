@@ -49,10 +49,11 @@ enum Command {
         force: bool,
     },
 
-    /// 提取卡牌语音 (骨架)
+    /// 提取音频: 解密 Wwise 映射 → 解析 AKPK → WEM 提取 → MP3 转码
     Audio {
-        #[command(subcommand)]
-        sub: AudioCmd,
+        /// 语言变体: Chs/Eng/Jpn/Kor/Cht，或 all
+        #[arg(short, long, default_value = "all")]
+        variant: String,
     },
 
     /// 处理卡图纹理 (骨架)
@@ -82,11 +83,6 @@ enum AssetCmd {
     Batch { #[arg(short, long, default_value = "Chs")] variant: String, #[arg(short = 'c', long, default_value = "8")] concurrency: usize },
 }
 
-#[derive(Subcommand)]
-enum AudioCmd {
-    WwiseMap { #[arg(short, long)] mapping: String, #[arg(short, long)] pck_root: String, #[arg(long)] wwiser_path: String, #[arg(short, long, default_value = "data/exports/audio/wem_mapping.json")] output: String },
-    Extract { #[arg(short, long)] pck_root: Option<String>, #[arg(short, long)] force: bool },
-}
 
 // ============================================================================
 // 常量
@@ -261,7 +257,32 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Audio { .. } => todo!("audio"),
+        Command::Audio { variant } => {
+            let cfg = config::load()?;
+            let vgmstream_path = std::path::Path::new(&cfg.vgmstream_path);
+
+            for v in expand_variants(&variant) {
+                // 1. 解密 Wwise 事件映射表
+                let mapping_path = std::path::Path::new(&cfg.data_dir)
+                    .join("variants").join(&v).join("raw-assets")
+                    .join("sound/WwiseIdMapping.bytes");
+                let data = std::fs::read(&mapping_path)
+                    .with_context(|| format!("[{v}] 请先运行 wbu asset batch -v {v}"))?;
+                let event_map = audio::wwise::decrypt_wwise_event_table(&data)?;
+
+                // 2. 扫描 .pck 文件目录
+                let pck_dir = std::path::Path::new(&cfg.data_dir)
+                    .join("variants").join(&v).join("raw-assets").join("sound");
+                let output_dir = std::path::Path::new(&cfg.data_dir)
+                    .join("exports").join("audio").join(&v);
+
+                println!("[{v}] 扫描 {}", pck_dir.display());
+                let stats = audio::extract_all(&pck_dir, &output_dir, &event_map, vgmstream_path, &cfg.ffmpeg_path)?;
+
+                println!("[{v}] pck: {} | WEM: {} | MP3: {} | 失败: {}",
+                    stats.pck_files, stats.wem_extracted, stats.wem_converted, stats.failed);
+            }
+        }
         Command::Texture { .. } => todo!("texture"),
         Command::Metadb { .. } => todo!("metadb"),
         Command::Localize { .. } => todo!("localize"),

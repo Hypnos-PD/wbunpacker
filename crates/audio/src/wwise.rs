@@ -22,7 +22,6 @@
 
 use anyhow::Context;
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use aes::cipher::{BlockDecryptMut, KeyIvInit};
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
