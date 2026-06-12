@@ -259,15 +259,22 @@ pub fn extract_all(
     stats.pck_files = pck_files.len();
     tracing::info!("扫描到 {} 个 .pck 文件", pck_files.len());
 
-    // 先统计总 WEM 数，用于进度条
+    // 第一遍：统计 WEM 总数（快速扫 AKPK header，不解析 RIFF）
+    tracing::info!("扫描 {} 个 .pck 统计 WEM 数量...", pck_files.len());
     let mut total_wem = 0usize;
-    let mut pck_entries: Vec<(&std::path::PathBuf, Vec<u8>, HashMap<u32, u32>)> = Vec::new();
-    for pck_path in &pck_files {
+    let mut file_list: Vec<&std::path::PathBuf> = Vec::new();
+    for (i, pck_path) in pck_files.iter().enumerate() {
         let data = std::fs::read(pck_path)
             .with_context(|| format!("无法读取: {}", pck_path.display()))?;
         let entries = parse_akpk(&data);
-        total_wem += entries.len();
-        pck_entries.push((pck_path, data, entries));
+        let n = entries.len();
+        total_wem += n;
+        if n > 0 {
+            file_list.push(pck_path);
+        }
+        if (i + 1) % 50 == 0 || i == pck_files.len() - 1 {
+            tracing::info!("  已扫描 {}/{} 个 pck, 累计 {} WEM", i + 1, pck_files.len(), total_wem);
+        }
     }
 
     let pb = ProgressBar::new(total_wem as u64);
@@ -279,23 +286,29 @@ pub fn extract_all(
         .progress_chars("##-"),
     );
 
-    // 先全局收集所有 pck 的 HIRC，构建跨 bank 的 wem→event 映射
-    let pck_refs: Vec<(&std::path::Path, &[u8])> = pck_entries
-        .iter()
-        .map(|(p, d, _)| (p.as_path(), d.as_slice()))
-        .collect();
-    let event_map = match wwise::build_global_wem_mapping(mapping_data, &pck_refs) {
-        Ok(m) => {
-            tracing::info!("全局 WEM 映射: {} 个条目", m.len());
-            m
+    // 全局收集 HIRC：只加载一次数据用于解析映射
+    tracing::info!("解析 HIRC 映射（{} 个 pck）...", file_list.len());
+    let event_map = {
+        let mut pck_datas: Vec<Vec<u8>> = Vec::with_capacity(file_list.len());
+        for pck_path in &file_list {
+            pck_datas.push(std::fs::read(pck_path)?);
         }
-        Err(e) => {
-            tracing::error!("全局 HIRC 解析失败: {e}");
-            return Err(e);
-        }
+        let pck_refs: Vec<(&std::path::Path, &[u8])> = file_list
+            .iter()
+            .zip(pck_datas.iter())
+            .map(|(p, d)| (p.as_path(), d.as_slice()))
+            .collect();
+        let m = wwise::build_global_wem_mapping(mapping_data, &pck_refs)?;
+        tracing::info!("全局 WEM 映射: {} 个条目", m.len());
+        m
+        // pck_datas 和 pck_refs 在此被 drop
     };
 
-    for (pck_path, data, entries) in &pck_entries {
+    // 第二遍：逐文件处理 WEM 提取
+    for pck_path in &file_list {
+        let data = std::fs::read(pck_path)
+            .with_context(|| format!("无法读取: {}", pck_path.display()))?;
+        let entries = parse_akpk(&data);
         if entries.is_empty() {
             continue;
         }
@@ -308,8 +321,8 @@ pub fn extract_all(
             entries.len()
         );
 
-        for (wem_id, offset) in entries {
-            let wem_data = match extract_wem(data, *offset) {
+        for (wem_id, offset) in &entries {
+            let wem_data = match extract_wem(&data, *offset) {
                 Some(d) => d,
                 None => {
                     stats.failed += 1;
