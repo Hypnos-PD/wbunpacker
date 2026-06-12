@@ -49,7 +49,7 @@ enum Command {
         force: bool,
     },
 
-    /// 提取音频: 解密 Wwise 映射 → 解析 AKPK → WEM 提取 → MP3 转码
+    /// 提取音频: 解密 Wwise 映射 → 解析 AKPK → WEM 提取 → WAV 输出
     Audio {
         /// 语言变体: Chs/Eng/Jpn/Kor/Cht，或 all
         #[arg(short, long, default_value = "all")]
@@ -277,10 +277,10 @@ async fn main() -> anyhow::Result<()> {
                     .join("exports").join("audio").join(&v);
 
                 println!("[{v}] 扫描 {}", pck_dir.display());
-                let stats = audio::extract_all(&pck_dir, &output_dir, &event_map, vgmstream_path, &cfg.ffmpeg_path)?;
+                let stats = audio::extract_all(&pck_dir, &output_dir, &event_map, vgmstream_path)?;
 
-                println!("[{v}] pck: {} | WEM: {} | MP3: {} | 失败: {}",
-                    stats.pck_files, stats.wem_extracted, stats.wem_converted, stats.failed);
+                println!("[{v}] pck: {} | WAV: {} | 跳过: {} | 失败: {}",
+                    stats.pck_files, stats.wav_output, stats.skipped, stats.failed);
             }
         }
         Command::Texture { .. } => todo!("texture"),

@@ -1,35 +1,31 @@
-//! Wwise 音频提取模块
+//! Wwise 音频提取与转码模块
 //!
-//! # 概述
+//! 从 .pck (AKPK 容器) 中提取 Wwise WEM 音频并转码为 WAV。
+//! 如需 MP3，使用 `convert_dir_to_mp3()` 作为独立后处理步骤。
 //!
-//! 从游戏 CDN 下载的 .pck (AKPK 容器) 文件中提取 Wwise WEM 音频，
-//! 并通过 vgmstream + ffmpeg 转码为 MP3。
+//! # 默认管线
 //!
-//! # 管线
-//!
-//! `	ext
+//! ```text
 //! sound/WwiseIdMapping.bytes  (AES-256-CBC)
 //!     │   decrypt_wwise_event_table()
 //!     ▼
-//!   event_id → event_name 映射
+//!   event_id → event_name 映射（全局，不分语言）
 //!
 //! sound/Windows/*/*.pck  (AKPK 容器)
 //!     │   parse_akpk()  → wem_id → (pck内偏移)
 //!     │   extract_wem() → WEM RIFF 数据
-//!     ▼
-//!   .wem 临时文件
 //!     │   wem_to_wav()  (vgmstream)
 //!     ▼
-//!   .wav 临时文件
-//!     │   wav_to_mp3()  (ffmpeg)
-//!     ▼
-//!   .mp3  ← 按 event_name 组织输出
-//! `
+//!   {output_dir}/{event_name}.wav
+//!           │
+//!           │  （可选）convert_dir_to_mp3()
+//!           ▼
+//!   {output_dir}/{event_name}.mp3
+//! ```
 
 use anyhow::Context;
 use std::collections::HashMap;
 use std::path::Path;
-
 
 pub mod wwise;
 
@@ -50,20 +46,16 @@ const WEM_ENTRY_SIZE: usize = 20;
 // 数据结构
 // ============================================================================
 
-/// 单条 WEM 提取结果
-#[derive(Debug)]
-pub struct WemExtractResult {
-    pub wem_id: u32,
-    pub event_name: Option<String>,
-    pub output_path: String,
-}
-
 /// 批量提取统计
 #[derive(Debug, Default)]
 pub struct AudioExtractStats {
+    /// 扫描到的 .pck 文件数
     pub pck_files: usize,
-    pub wem_extracted: usize,
-    pub wem_converted: usize,
+    /// 成功输出的 WAV 文件数
+    pub wav_output: usize,
+    /// 被跳过的（已存在）
+    pub skipped: usize,
+    /// 失败数
     pub failed: usize,
 }
 
@@ -98,6 +90,7 @@ pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
         None => return HashMap::new(),
     };
 
+    // 从 BKHD 向前跳过零值填充
     let mut pos = bkhd_pos;
     while pos > hdr_size.saturating_sub(200) {
         let v = u32::from_le_bytes([data[pos - 4], data[pos - 3], data[pos - 2], data[pos - 1]]);
@@ -107,6 +100,7 @@ pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
         pos -= 4;
     }
 
+    // 反向读取 20 字节 WEM 条目
     let mut entries = HashMap::new();
     while pos > 0x54 {
         pos = pos.saturating_sub(WEM_ENTRY_SIZE);
@@ -130,6 +124,7 @@ pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
         {
             entries.insert(wem_id, offset);
         } else {
+            // 遇到无效条目 → 列表结束
             break;
         }
     }
@@ -162,7 +157,7 @@ pub fn extract_wem(data: &[u8], offset: u32) -> Option<&[u8]> {
 // 转码
 // ============================================================================
 
-/// 调用 vgmstream 将 WEM 数据转码为 WAV。
+/// 调用 vgmstream 将内存中的 WEM 数据转码为 WAV 文件。
 ///
 /// vgmstream 是一个专门的游戏音频解码库，支持 Wwise WEM、ADPCM、Vorbis 等格式。
 pub fn wem_to_wav(
@@ -170,6 +165,7 @@ pub fn wem_to_wav(
     output: &Path,
     vgmstream_path: &Path,
 ) -> anyhow::Result<()> {
+    // vgmstream 不支持 stdin，需要临时文件
     let tmp = std::env::temp_dir().join(format!("wbu_{}.wem", std::process::id()));
     std::fs::write(&tmp, wem_data)?;
 
@@ -188,7 +184,9 @@ pub fn wem_to_wav(
     Ok(())
 }
 
-/// 调用 ffmpeg 将 WAV 转码为 MP3。
+/// 调用 ffmpeg 将单个 WAV 文件转码为 MP3。
+///
+/// 参数：`-b:a 128k`，剥离元数据，覆盖已存在文件。
 pub fn wav_to_mp3(wav_path: &Path, mp3_path: &Path, ffmpeg_path: &str) -> anyhow::Result<()> {
     let status = std::process::Command::new(ffmpeg_path)
         .args([
@@ -199,12 +197,14 @@ pub fn wav_to_mp3(wav_path: &Path, mp3_path: &Path, ffmpeg_path: &str) -> anyhow
             "libmp3lame",
             "-b:a",
             "128k",
+            "-map_metadata",
+            "-1",
             &mp3_path.to_string_lossy(),
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .with_context(|| "无法执行 ffmpeg，请确认已安装并在 PATH 中")?;
+        .with_context(|| format!("无法执行 ffmpeg: {ffmpeg_path}"))?;
 
     if !status.success() {
         return Err(anyhow::anyhow!("ffmpeg 转码失败，退出码: {:?}", status.code()));
@@ -213,32 +213,32 @@ pub fn wav_to_mp3(wav_path: &Path, mp3_path: &Path, ffmpeg_path: &str) -> anyhow
 }
 
 // ============================================================================
-// 批量提取
+// 批量提取（默认管线：WEM → WAV）
 // ============================================================================
 
-/// 扫描 pck 目录，提取所有 WEM 并转码为 MP3。
+/// 扫描 pck 目录，提取所有 WEM 并转码为 WAV。
 ///
 /// # 参数
-/// - pck_dir: 包含 .pck 文件的目录（递归扫描）
-/// - output_dir: MP3 输出根目录
-/// - vent_map: Wwise event_id → event_name 映射（来自 WwiseIdMapping.bytes）
-/// - gmstream_path: vgmstream-cli.exe 的完整路径
+/// - `pck_dir`: 包含 .pck 文件的目录（递归扫描）
+/// - `output_dir`: WAV 输出根目录
+/// - `event_map`: Wwise event_id → event_name 映射（来自 WwiseIdMapping.bytes）
+/// - `vgmstream_path`: vgmstream-cli.exe 的完整路径
 ///
 /// # 输出结构
-/// `	ext
+///
+/// ```text
 /// {output_dir}/
-///     Play_fx_smn_10244120_1.mp3
-///     Play_fx_sty_010101_timeshift_rewind_small.mp3
+///     Play_fx_smn_10244120_1.wav
+///     Play_fx_sty_010101_timeshift_rewind_small.wav
 ///     ...
 ///     _unmapped/
-///         {wem_id}.mp3  ← 未能匹配到事件名的 WEM
-/// `
+///         {wem_id}.wav  ← 未能匹配到事件名的 WEM
+/// ```
 pub fn extract_all(
     pck_dir: &Path,
     output_dir: &Path,
     event_map: &std::collections::BTreeMap<u32, String>,
     vgmstream_path: &Path,
-    ffmpeg_path: &str,
 ) -> anyhow::Result<AudioExtractStats> {
     std::fs::create_dir_all(output_dir)?;
     let unmapped_dir = output_dir.join("_unmapped");
@@ -279,53 +279,73 @@ pub fn extract_all(
             let event_name = event_map.get(wem_id);
 
             let out_path = if let Some(name) = event_name {
-                output_dir.join(format!("{}.mp3", name))
+                output_dir.join(format!("{}.wav", name))
             } else {
                 std::fs::create_dir_all(&unmapped_dir)?;
-                unmapped_dir.join(format!("{}.mp3", wem_id))
+                unmapped_dir.join(format!("{}.wav", wem_id))
             };
 
+            // 跳过已存在的文件
             if out_path.exists() {
-                stats.wem_extracted += 1;
+                stats.skipped += 1;
                 continue;
             }
 
-            // WEM → WAV
-            let wav_tmp = std::env::temp_dir().join(format!("wbu_{}.wav", wem_id));
-            match wem_to_wav(wem_data, &wav_tmp, vgmstream_path) {
-                Ok(()) => {}
+            match wem_to_wav(wem_data, &out_path, vgmstream_path) {
+                Ok(()) => {
+                    stats.wav_output += 1;
+                }
                 Err(e) => {
                     tracing::error!("WEM→WAV 失败 {}: {e}", wem_id);
                     stats.failed += 1;
-                    continue;
                 }
             }
-
-            // WAV → MP3
-            match wav_to_mp3(&wav_tmp, &out_path, ffmpeg_path) {
-                Ok(()) => {
-                    stats.wem_converted += 1;
-                }
-                Err(e) => {
-                    tracing::error!("WAV→MP3 失败 {}: {e}", wem_id);
-                    stats.failed += 1;
-                }
-            }
-
-            let _ = std::fs::remove_file(&wav_tmp);
-            stats.wem_extracted += 1;
         }
     }
 
     tracing::info!(
-        "音频提取完成: {} pck, {} WEM 提取, {} MP3 转换, {} 失败",
+        "音频提取完成: {} pck, {} WAV 输出, {} 跳过, {} 失败",
         stats.pck_files,
-        stats.wem_extracted,
-        stats.wem_converted,
+        stats.wav_output,
+        stats.skipped,
         stats.failed
     );
 
     Ok(stats)
+}
+
+/// 批量将目录中的 WAV 文件转码为 MP3（可选后处理）。
+///
+/// 扫描 `wav_dir` 下所有 .wav 文件，转码到 `mp3_dir`，保持相对目录结构。
+pub fn convert_dir_to_mp3(
+    wav_dir: &Path,
+    mp3_dir: &Path,
+    ffmpeg_path: &str,
+) -> anyhow::Result<usize> {
+    std::fs::create_dir_all(mp3_dir)?;
+
+    let mut converted = 0usize;
+    for entry in walkdir::WalkDir::new(wav_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|x| x == "wav").unwrap_or(false))
+    {
+        let rel = entry.path().strip_prefix(wav_dir)?;
+        let mp3_path = mp3_dir.join(rel).with_extension("mp3");
+
+        if mp3_path.exists() {
+            continue;
+        }
+        if let Some(parent) = mp3_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        wav_to_mp3(entry.path(), &mp3_path, ffmpeg_path)?;
+        converted += 1;
+    }
+
+    tracing::info!("MP3 转码完成: {} 个文件", converted);
+    Ok(converted)
 }
 
 // ============================================================================
