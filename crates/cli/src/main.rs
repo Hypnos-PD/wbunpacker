@@ -266,9 +266,8 @@ async fn main() -> anyhow::Result<()> {
             let mapping_path = std::path::Path::new(&cfg.data_dir)
                 .join("variants").join(first_variant).join("raw-assets")
                 .join("sound/WwiseIdMapping.bytes");
-            let data = std::fs::read(&mapping_path)
+            let mapping_data = std::fs::read(&mapping_path)
                 .with_context(|| format!("请先运行 wbu asset batch -v {first_variant}"))?;
-            let event_map = audio::wwise::decrypt_wwise_event_table(&data)?;
 
             let pck_dir = std::path::Path::new(&cfg.data_dir)
                 .join("variants").join(first_variant).join("raw-assets").join("sound");
@@ -276,7 +275,7 @@ async fn main() -> anyhow::Result<()> {
                 .join("exports").join("audio");
 
             println!("扫描 {}", pck_dir.display());
-            let stats = audio::extract_all(&pck_dir, &output_dir, &event_map, vgmstream_path)?;
+            let stats = audio::extract_all(&pck_dir, &output_dir, &mapping_data, vgmstream_path)?;
 
             println!("pck: {} | WAV: {} | 跳过: {} | 失败: {}",
                 stats.pck_files, stats.wav_output, stats.skipped, stats.failed);

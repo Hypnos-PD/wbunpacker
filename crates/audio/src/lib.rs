@@ -25,7 +25,7 @@
 
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 pub mod wwise;
@@ -238,7 +238,7 @@ pub fn wav_to_mp3(wav_path: &Path, mp3_path: &Path, ffmpeg_path: &str) -> anyhow
 pub fn extract_all(
     pck_dir: &Path,
     output_dir: &Path,
-    event_map: &std::collections::BTreeMap<u32, String>,
+    mapping_data: &[u8],
     vgmstream_path: &Path,
 ) -> anyhow::Result<AudioExtractStats> {
     std::fs::create_dir_all(output_dir)?;
@@ -279,10 +279,27 @@ pub fn extract_all(
         .progress_chars("##-"),
     );
 
-    for (_pck_path, data, entries) in &pck_entries {
+    for (pck_path, data, entries) in &pck_entries {
         if entries.is_empty() {
             continue;
         }
+
+        // 每个 pck 独立解析 HIRC → wem_id → event_name
+        let event_map = match wwise::build_wem_mapping_for_pck(mapping_data, data) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("HIRC 解析失败 {}: {e}", pck_path.display());
+                BTreeMap::new()
+            }
+        };
+        let mapped = event_map.len();
+        let total = entries.len();
+        tracing::debug!(
+            "{}: {}/{} WEM 匹配到事件名",
+            pck_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+            mapped,
+            total
+        );
 
         for (wem_id, offset) in entries {
             let wem_data = match extract_wem(data, *offset) {
