@@ -170,13 +170,21 @@ pub fn wem_to_wav(
     let tmp = std::env::temp_dir().join(format!("wbu_{}.wem", std::process::id()));
     std::fs::write(&tmp, wem_data)?;
 
-    let status = std::process::Command::new(vgmstream_path)
-        .arg("-o")
+    let mut cmd = std::process::Command::new(vgmstream_path);
+    cmd.arg("-o")
         .arg(output)
         .arg(&tmp)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .stderr(std::process::Stdio::null());
+    // Windows: 禁止 vgmstream 弹出控制台窗口或向父进程控制台写日志
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    }
+    let status = cmd.status()
         .with_context(|| format!("无法执行 vgmstream: {}", vgmstream_path.display()))?;
 
     let _ = std::fs::remove_file(&tmp);
@@ -262,10 +270,9 @@ pub fn extract_all(
     tracing::info!("扫描到 {} 个 .pck 文件", pck_files.len());
 
     // 第一遍：统计 WEM 总数（快速扫 AKPK header，不解析 RIFF）
-    tracing::info!("扫描 {} 个 .pck 统计 WEM 数量...", pck_files.len());
     let mut total_wem = 0usize;
     let mut file_list: Vec<&std::path::PathBuf> = Vec::new();
-    for (i, pck_path) in pck_files.iter().enumerate() {
+    for pck_path in &pck_files {
         let data = std::fs::read(pck_path)
             .with_context(|| format!("无法读取: {}", pck_path.display()))?;
         let entries = parse_akpk(&data);
@@ -274,8 +281,11 @@ pub fn extract_all(
         if n > 0 {
             file_list.push(pck_path);
         }
-        // silence - single summary at end
     }
+    tracing::info!(
+        "扫描 {} 个 pck，共 {} 个 WEM（{} 个含音频的 pck）",
+        pck_files.len(), total_wem, file_list.len()
+    );
 
     let pb = ProgressBar::new(total_wem as u64);
     pb.set_style(
@@ -313,18 +323,12 @@ pub fn extract_all(
             continue;
         }
 
-        let mapped = entries.iter().filter(|(id, _)| event_map.contains_key(id)).count();
-        tracing::debug!(
-            "{}: {}/{} WEM 匹配到事件名",
-            pck_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-            mapped,
-            entries.len()
-        );
 
         for (wem_id, offset) in &entries {
             let wem_data = match extract_wem(&data, *offset) {
                 Some(d) => d,
                 None => {
+                    tracing::warn!("WEM {} 提取失败（无效偏移或无 RIFF 头）", wem_id);
                     stats.failed += 1;
                     pb.inc(1);
                     continue;

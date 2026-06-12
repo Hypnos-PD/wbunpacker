@@ -185,7 +185,9 @@ pub fn extract_banks_from_pck(pck_data: &[u8]) -> Vec<Vec<u8>> {
             }
             first_block = false;
 
-            if !chunk_id::ALL.contains(&cid) {
+            // 只检查 chunk size 合理性，不再用白名单过滤未知 chunk 类型
+            // （Wwise bank 可能包含不在白名单中的 chunk，过滤会导致 bank 被截断）
+            if csize == 0 || csize > 0x100_0000 {
                 break;
             }
 
@@ -368,9 +370,15 @@ pub fn build_global_wem_mapping(
     let mut sound_to_action: BTreeMap<u32, u32> = BTreeMap::new();
     let mut action_to_event: BTreeMap<u32, u32> = BTreeMap::new();
 
+    let mut total_banks = 0usize;
+    let mut banks_with_hirc = 0usize;
     for (_pck_path, pck_data) in pck_data_list {
         let banks = extract_banks_from_pck(pck_data);
+        total_banks += banks.len();
         for bank in &banks {
+            if find_chunk(bank, chunk_id::HIRC).is_some() {
+                banks_with_hirc += 1;
+            }
             collect_hirc_mappings(
                 bank,
                 &mut wem_to_sound,
@@ -379,6 +387,7 @@ pub fn build_global_wem_mapping(
             );
         }
     }
+    // bank 统计完成
 
     // 全局关联: wem_id → sound_id → action_id → event_id → event_name
     let mut result = BTreeMap::new();
@@ -404,6 +413,20 @@ pub fn build_global_wem_mapping(
 }
 
 /// 从单个 bank 提取 HIRC 映射，追加到全局集合。
+///
+/// 对照 wwiser 解析 Shadowverse WB 实测结果：
+///
+/// CAkSound (type 0x02):
+///   sid      = HIRC ulID
+///   wem_id   = type_data[+5..+9] （AkMediaInformation.sourceID，跳过 ulPluginID:u32 + StreamType:u8）
+///
+/// CAkActionPlay (type 0x03, ulActionType == 0x0403):
+///   sid      = HIRC ulID
+///   idExt    = type_data[+2..+6] （ActionInitialValues.idExt，跳过 ulActionType:u16）
+///
+/// CAkEvent (type 0x04):
+///   sid      = HIRC ulID
+///   type_data 以 var(ulActionListSize) 开头，后跟 ulActionID[]（指向 Action 的 sid）
 fn collect_hirc_mappings(
     bank_data: &[u8],
     wem_to_sound: &mut BTreeMap<u32, u32>,
@@ -426,9 +449,6 @@ fn collect_hirc_mappings(
 
     let mut pos = hirc_off + 12;
 
-    let mut cnt02 = 0u32; let mut cnt03 = 0u32; let mut cnt04 = 0u32;
-    let mut cnt02ok = 0u32; let mut cnt03ok = 0u32; let mut cnt04ok = 0u32;
-
     for _ in 0..count {
         if pos + 9 > bank_data.len() {
             break;
@@ -439,7 +459,7 @@ fn collect_hirc_mappings(
             bank_data[pos + 1], bank_data[pos + 2],
             bank_data[pos + 3], bank_data[pos + 4],
         ]) as usize;
-        let _obj_id = u32::from_le_bytes([
+        let obj_sid = u32::from_le_bytes([
             bank_data[pos + 5], bank_data[pos + 6],
             bank_data[pos + 7], bank_data[pos + 8],
         ]);
@@ -450,32 +470,42 @@ fn collect_hirc_mappings(
 
         match obj_type {
             0x02 => {
-                // CAkSound: wem_id at +5 (after plugin_id u32 + StreamType u8)
+                // CAkSound: sourceID(wem_id) 在 +5（跳过 ulPluginID:u32 + StreamType:u8）
                 if data_len >= 9 {
                     let wem_id = read_u32_le(&bank_data[data_start + 5..]);
-                    wem_to_sound.insert(wem_id, _obj_id);
+                    wem_to_sound.insert(wem_id, obj_sid);
                 }
             }
             0x03 => {
-                // CAkAction: action_id = HIRC ulID, sound_id = data[+6] (idExt)
-                if data_len >= 10 {
-                    let sound_id = read_u32_le(&bank_data[data_start + 6..]);
-                    sound_to_action.insert(sound_id, _obj_id);
+                // CAkAction: ulActionType:u16 在 +0, idExt:u32 在 +2
+                // 只取 CAkActionPlay (ulActionType == 0x0403)
+                if data_len >= 6 {
+                    let action_type = u16::from_le_bytes([
+                        bank_data[data_start], bank_data[data_start + 1],
+                    ]);
+                    if action_type == 0x0403 {
+                        let sound_sid = read_u32_le(&bank_data[data_start + 2..]);
+                        if sound_sid != 0 {
+                            sound_to_action.insert(sound_sid, obj_sid);
+                        }
+                    }
                 }
             }
             0x04 => {
-                // CAkEvent: event_id = HIRC ulID, action_ids in data[+4..]
-                if data_len >= 4 {
+                // CAkEvent: type_data 以 var(ulActionListSize) 开头，后跟 ulActionID[]
+                if data_len >= 1 {
                     let (action_count, var_bytes) =
-                        read_var_u32(&bank_data[data_start + 4..]);
-                    let list_start = data_start + 4 + var_bytes;
-                    let available = data_end.saturating_sub(list_start) / 4;
-                    let limit = action_count.min(available as u32);
-                    for i in 0..limit as usize {
-                        let off = list_start + i * 4;
-                        if off + 4 <= data_end {
-                            let action_id = read_u32_le(&bank_data[off..]);
-                            action_to_event.insert(action_id, _obj_id);
+                        read_var_u32(&bank_data[data_start..]);
+                    if action_count > 0 {
+                        let list_start = data_start + var_bytes;
+                        let available = data_end.saturating_sub(list_start) / 4;
+                        let limit = action_count.min(available as u32);
+                        for i in 0..limit as usize {
+                            let off = list_start + i * 4;
+                            if off + 4 <= data_end {
+                                let action_sid = read_u32_le(&bank_data[off..]);
+                                action_to_event.insert(action_sid, obj_sid);
+                            }
                         }
                     }
                 }
@@ -486,7 +516,6 @@ fn collect_hirc_mappings(
         pos = data_end;
     }
 }
-
 // ============================================================================
 // 测试
 // ============================================================================
@@ -566,4 +595,213 @@ mod tests {
             println!("  {} → {}", wem_id, name);
         }
     }
-}
+/// 从单个 bank 提取 HIRC 映射，追加到全局集合。
+///
+/// 对照 wwiser 实际解析结果（非 wwiser 文档，而是解析 Shadowverse WB bank 的实测）：
+///
+/// CAkSound (type 0x02):
+///   sid      = HIRC ulID
+///   wem_id   = type_data[+5..+9] （AkMediaInformation.sourceID）
+///
+/// CAkActionPlay (type 0x03, ulActionType == 0x0403):
+///   sid      = HIRC ulID
+///   idExt    = type_data[+2..+6] （ActionInitialValues.idExt, 指向 Sound 的 sid）
+///
+/// CAkEvent (type 0x04):
+///   sid      = HIRC ulID
+///   type_data 以 var(ulActionListSize) 开头，然后是 ulActionID[]（指向 Action 的 sid）
+fn collect_hirc_mappings(
+    bank_data: &[u8],
+    wem_to_sound: &mut BTreeMap<u32, u32>,
+    sound_to_action: &mut BTreeMap<u32, u32>,
+    action_to_event: &mut BTreeMap<u32, u32>,
+) {
+    let hirc_off = match find_chunk(bank_data, chunk_id::HIRC) {
+        Some(o) => o,
+        None => return,
+    };
+
+    if hirc_off + 12 > bank_data.len() {
+        return;
+    }
+
+    let count = u32::from_le_bytes([
+        bank_data[hirc_off + 8], bank_data[hirc_off + 9],
+        bank_data[hirc_off + 10], bank_data[hirc_off + 11],
+    ]) as usize;
+
+    let mut pos = hirc_off + 12;
+
+    for _ in 0..count {
+        if pos + 9 > bank_data.len() {
+            break;
+        }
+
+        let obj_type = bank_data[pos];
+        let dw_section_size = u32::from_le_bytes([
+            bank_data[pos + 1], bank_data[pos + 2],
+            bank_data[pos + 3], bank_data[pos + 4],
+        ]) as usize;
+        let obj_sid = u32::from_le_bytes([  // HIRC ulID = Wwise short ID
+            bank_data[pos + 5], bank_data[pos + 6],
+            bank_data[pos + 7], bank_data[pos + 8],
+        ]);
+
+        let data_start = pos + 9;
+        let data_len = dw_section_size.saturating_sub(4);
+        let data_end = (data_start + data_len).min(bank_data.len());
+
+        match obj_type {
+            0x02 => {
+                // CAkSound: sourceID (wem_id) 在 AkBankSourceData.AkMediaInformation 内
+                // 平坦偏移: +0 ulPluginID(u32), +4 StreamType(u8), +5 sourceID(u32)
+                if data_len >= 9 {
+                    let wem_id = read_u32_le(&bank_data[data_start + 5..]);
+                    wem_to_sound.insert(wem_id, obj_sid);
+                }
+            }
+            0x03 => {
+                // CAkAction*: +0 ulActionType(u16), +2 idExt(u32, ActionInitialValues)
+                // 只取 CAkActionPlay（ulActionType = 0x0403）
+                if data_len >= 6 {
+                    let action_type = u16::from_le_bytes([
+                        bank_data[data_start], bank_data[data_start + 1],
+                    ]);
+                    if action_type == 0x0403 {
+                        let sound_sid = read_u32_le(&bank_data[data_start + 2..]);
+                        if sound_sid != 0 {
+                            sound_to_action.insert(sound_sid, obj_sid);
+                        }
+                    }
+                }
+            }
+            0x04 => {
+                // CAkEvent: type_data 以 var(ulActionListSize) 开头，后跟 ulActionID[]
+                if data_len >= 1 {
+                    let (action_count, var_bytes) =
+                        read_var_u32(&bank_data[data_start..]);
+                    let list_start = data_start + var_bytes;
+                    let available = data_end.saturating_sub(list_start) / 4;
+                    let limit = action_count.min(available as u32);
+                    for i in 0..limit as usize {
+                        let off = list_start + i * 4;
+                        if off + 4 <= data_end {
+                            let action_sid = read_u32_le(&bank_data[off..]);
+                            action_to_event.insert(action_sid, obj_sid);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        pos = data_end;
+    }
+}/// 从单个 bank 提取 HIRC 映射，追加到全局集合。
+///
+/// 对照 wwiser 实际解析 Shadowverse WB bank 的实测结果。
+fn collect_hirc_mappings(
+    bank_data: &[u8],
+    wem_to_sound: &mut BTreeMap<u32, u32>,
+    sound_to_action: &mut BTreeMap<u32, u32>,
+    action_to_event: &mut BTreeMap<u32, u32>,
+) {
+    let hirc_off = match find_chunk(bank_data, chunk_id::HIRC) {
+        Some(o) => o,
+        None => return,
+    };
+
+    if hirc_off + 12 > bank_data.len() {
+        return;
+    }
+
+    let count = u32::from_le_bytes([
+        bank_data[hirc_off + 8], bank_data[hirc_off + 9],
+        bank_data[hirc_off + 10], bank_data[hirc_off + 11],
+    ]) as usize;
+
+    let mut pos = hirc_off + 12;
+
+    let mut n_sound = 0u32; let mut n_action = 0u32; let mut n_action_play = 0u32;
+    let mut n_event = 0u32; let mut n_event_with_acts = 0u32;
+
+    for _ in 0..count {
+        if pos + 9 > bank_data.len() {
+            break;
+        }
+
+        let obj_type = bank_data[pos];
+        let dw_section_size = u32::from_le_bytes([
+            bank_data[pos + 1], bank_data[pos + 2],
+            bank_data[pos + 3], bank_data[pos + 4],
+        ]) as usize;
+        let obj_sid = u32::from_le_bytes([
+            bank_data[pos + 5], bank_data[pos + 6],
+            bank_data[pos + 7], bank_data[pos + 8],
+        ]);
+
+        let data_start = pos + 9;
+        let data_len = dw_section_size.saturating_sub(4);
+        let data_end = (data_start + data_len).min(bank_data.len());
+
+        match obj_type {
+            0x02 => {
+                n_sound += 1;
+                // CAkSound: sourceID (wem_id) 在 +5（跳过 ulPluginID:u32 + StreamType:u8）
+                if data_len >= 9 {
+                    let wem_id = read_u32_le(&bank_data[data_start + 5..]);
+                    wem_to_sound.insert(wem_id, obj_sid);
+                }
+            }
+            0x03 => {
+                n_action += 1;
+                // 只取 CAkActionPlay（ulActionType == 0x0403）
+                // ulActionType:u16 在 +0, idExt:u32 在 +2
+                if data_len >= 6 {
+                    let action_type = u16::from_le_bytes([
+                        bank_data[data_start], bank_data[data_start + 1],
+                    ]);
+                    if action_type == 0x0403 {
+                        n_action_play += 1;
+                        let sound_sid = read_u32_le(&bank_data[data_start + 2..]);
+                        if sound_sid != 0 {
+                            sound_to_action.insert(sound_sid, obj_sid);
+                        }
+                    }
+                }
+            }
+            0x04 => {
+                n_event += 1;
+                // CAkEvent: 从 data_start 开始是 var(ulActionListSize) + ulActionID[]
+                if data_len >= 1 {
+                    let (action_count, var_bytes) =
+                        read_var_u32(&bank_data[data_start..]);
+                    if action_count > 0 {
+                        n_event_with_acts += 1;
+                        let list_start = data_start + var_bytes;
+                        let available = data_end.saturating_sub(list_start) / 4;
+                        let limit = action_count.min(available as u32);
+                        for i in 0..limit as usize {
+                            let off = list_start + i * 4;
+                            if off + 4 <= data_end {
+                                let action_sid = read_u32_le(&bank_data[off..]);
+                                action_to_event.insert(action_sid, obj_sid);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        pos = data_end;
+    }
+
+    // 只打印含 Action/Event 的 bank 统计
+    if n_action > 0 || n_event > 0 {
+        tracing::debug!(
+            "bank HIRC: Sound={} Action={}(Play={}) Event={}(with_acts={})",
+            n_sound, n_action, n_action_play, n_event, n_event_with_acts
+        );
+    }
+}}
