@@ -54,7 +54,10 @@ enum Command {
         /// 同时转码 MP3
         #[arg(long)]
         mp3: bool,
+        #[command(subcommand)]
+        sub: Option<AudioCmd>,
     },
+
     /// 纹理处理
     Texture {
         #[command(subcommand)]
@@ -82,10 +85,11 @@ enum AssetCmd {
     Batch { #[arg(short, long, default_value = "Chs")] variant: String, #[arg(short = 'c', long, default_value = "8")] concurrency: usize },
 }
 
-
-// ============================================================================
-// 常量
-// ============================================================================
+#[derive(Subcommand)]
+enum AudioCmd {
+    /// 提取卡牌语音: 按语言/卡牌/槽位分发 → MP3 + voice_index.json
+    Card,
+}
 
 #[derive(Subcommand)]
 enum TextureCmd {
@@ -99,6 +103,10 @@ enum TextureCmd {
         no_resize: bool,
     },
 }
+
+// ============================================================================
+// 常量
+// ============================================================================
 
 const ALL_VARIANTS: &[&str] = &["Chs", "Eng", "Jpn", "Kor", "Cht"];
 const MASTER_BYTES_NAME: &str = "Master/mastermemory.bytes";
@@ -239,19 +247,18 @@ async fn main() -> anyhow::Result<()> {
 
                 let master_entry = m.raw_assets.iter()
                     .find(|r| r.name == MASTER_BYTES_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("manifest 中未找到 {}", MASTER_BYTES_NAME))?;
+                    .ok_or_else(|| anyhow::anyhow!("manifest 中未找到 {MASTER_BYTES_NAME}"))?;
 
                 let blobs_raw = std::path::Path::new(&cfg.data_dir).join("blobs").join("raw");
                 let blob_path = asset::blob_path(&blobs_raw, "", &master_entry.hash);
 
-                // --force: 删除旧缓存，强制重下
                 if force && blob_path.exists() {
                     std::fs::remove_file(&blob_path)?;
                     println!("[{v}] 已删除缓存，重新下载...");
                 }
 
                 if !blob_path.exists() {
-                    println!("[{v}] 下载 {} ...", MASTER_BYTES_NAME);
+                    println!("[{v}] 下载 {MASTER_BYTES_NAME} ...");
                     asset::download_asset(&master_entry.hash, &cfg.asset_bundle_address, &blob_path).await?;
                 }
 
@@ -269,37 +276,69 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Audio { mp3 } => {
+        Command::Audio { mp3, sub } => {
             let cfg = config::load()?;
+            let data_dir = std::path::Path::new(&cfg.data_dir);
             let vgmstream_path = std::path::Path::new(&cfg.vgmstream_path);
 
-            // 用第一个变体找 WwiseIdMapping（所有变体指向同一文件）
-            let first_variant = "Chs";
-            let mapping_path = std::path::Path::new(&cfg.data_dir)
-                .join("variants").join(first_variant).join("raw-assets")
-                .join("sound/WwiseIdMapping.bytes");
-            let mapping_data = std::fs::read(&mapping_path)
-                .with_context(|| format!("请先运行 wbu asset batch -v {first_variant}"))?;
+            match sub {
+                Some(AudioCmd::Card) => {
+                    let variant = "Chs";
+                    let card_resource_path = data_dir
+                        .join("exports").join("master-data").join(variant)
+                        .join("CardResourceMaster.json");
 
-            let pck_dir = std::path::Path::new(&cfg.data_dir)
-                .join("variants").join(first_variant).join("raw-assets").join("sound");
-            let output_dir = std::path::Path::new(&cfg.data_dir)
-                .join("exports").join("audio");
+                    let first_variant = "Chs";
+                    let mapping_path = data_dir
+                        .join("variants").join(first_variant).join("raw-assets")
+                        .join("sound/WwiseIdMapping.bytes");
+                    let mapping_data = std::fs::read(&mapping_path)
+                        .with_context(|| format!("请先运行 wbu asset batch -v {first_variant}"))?;
 
-            println!("扫描 {}", pck_dir.display());
-            let stats = audio::extract_all(&pck_dir, &output_dir, &mapping_data, vgmstream_path)?;
+                    let pck_root = data_dir
+                        .join("variants").join(first_variant).join("raw-assets").join("sound");
+                    let output_dir = data_dir.join("exports").join("card-voices");
 
-            println!("pck: {} | WAV: {} | 跳过: {} | 失败: {}",
-                stats.pck_files, stats.wav_output, stats.skipped, stats.failed);
+                    println!("CardResourceMaster: {}", card_resource_path.display());
+                    println!("pck 根目录: {}", pck_root.display());
+                    println!("输出目录: {}", output_dir.display());
 
-            if mp3 {
-                let mp3_dir = std::path::Path::new(&cfg.data_dir)
-                    .join("exports").join("audio-mp3");
-                println!("转码 MP3 → {}", mp3_dir.display());
-                let n = audio::convert_dir_to_mp3(&output_dir, &mp3_dir, &cfg.ffmpeg_path)?;
-                println!("MP3 完成: {n} 个文件");
+                    let audio_wav_dir = data_dir.join("exports").join("audio");
+                    let stats = audio::card_voices::extract_card_voices(
+                        &pck_root, &output_dir, &card_resource_path,
+                        &audio_wav_dir, &mapping_data, vgmstream_path, &cfg.ffmpeg_path,
+                    )?;
+
+                    println!("\n卡牌语音提取完成: {} 张卡, {} 个 MP3 (跳过: {})", stats.cards_processed, stats.files_output, stats.files_skipped);
+                }
+                None => {
+                    let first_variant = "Chs";
+                    let mapping_path = data_dir
+                        .join("variants").join(first_variant).join("raw-assets")
+                        .join("sound/WwiseIdMapping.bytes");
+                    let mapping_data = std::fs::read(&mapping_path)
+                        .with_context(|| format!("请先运行 wbu asset batch -v {first_variant}"))?;
+
+                    let pck_dir = data_dir
+                        .join("variants").join(first_variant).join("raw-assets").join("sound");
+                    let output_dir = data_dir.join("exports").join("audio");
+
+                    println!("扫描 {}", pck_dir.display());
+                    let stats = audio::extract_all(&pck_dir, &output_dir, &mapping_data, vgmstream_path)?;
+
+                    println!("pck: {} | WAV: {} | 跳过: {} | 失败: {}",
+                        stats.pck_files, stats.wav_output, stats.skipped, stats.failed);
+
+                    if mp3 {
+                        let mp3_dir = data_dir.join("exports").join("audio-mp3");
+                        println!("转码 MP3 → {}", mp3_dir.display());
+                        let n = audio::convert_dir_to_mp3(&output_dir, &mp3_dir, &cfg.ffmpeg_path)?;
+                        println!("MP3 完成: {n} 个文件");
+                    }
+                }
             }
         }
+
         Command::Texture { sub } => match sub {
             TextureCmd::Card { asset_studio, no_resize } => {
                 let cfg = config::load()?;
@@ -310,11 +349,10 @@ async fn main() -> anyhow::Result<()> {
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_card_textures(data_dir, &as_path, no_resize)?;
             }
-        }
+        },
         Command::Metadb { .. } => todo!("metadb"),
         Command::Localize { .. } => todo!("localize"),
     }
 
     Ok(())
-
 }

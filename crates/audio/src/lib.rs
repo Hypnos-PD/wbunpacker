@@ -29,6 +29,21 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 pub mod wwise;
+pub mod card_voices;
+
+/// 从 pck 路径中检测语言代码。
+///
+/// `sound/Windows/d/English(US)/...` → `Some("eng")`
+/// `sound/Windows/d/Japanese(JP)/...` → `Some("jpn")`
+/// 其他路径 → `None`
+fn detect_lang(pck_path: &std::path::Path) -> Option<&str> {
+    let parent = pck_path.parent()?.file_name()?.to_str()?;
+    match parent {
+        "English(US)" => Some("eng"),
+        "Japanese(JP)" => Some("jpn"),
+        _ => None,
+    }
+}
 
 // ============================================================================
 // 常量
@@ -251,8 +266,6 @@ pub fn extract_all(
     mapping_data: &[u8],
     vgmstream_path: &Path,
 ) -> anyhow::Result<AudioExtractStats> {
-    std::fs::create_dir_all(output_dir)?;
-    let unmapped_dir = output_dir.join("_unmapped");
 
     let mut stats = AudioExtractStats::default();
     let mut pck_files: Vec<std::path::PathBuf> = Vec::new();
@@ -337,11 +350,19 @@ pub fn extract_all(
 
             let event_name = event_map.get(wem_id);
 
-            let out_path = if let Some(name) = event_name {
-                output_dir.join(format!("{}.wav", name))
+            // 按语言分目录: eng/ jpn/ 或无前缀（背景音效等）
+            let lang_dir = if let Some(lang) = detect_lang(pck_path) {
+                output_dir.join(lang)
             } else {
-                std::fs::create_dir_all(&unmapped_dir)?;
-                unmapped_dir.join(format!("{}.wav", wem_id))
+                output_dir.to_path_buf()
+            };
+            let out_path = if let Some(name) = event_name {
+                std::fs::create_dir_all(&lang_dir)?;
+                lang_dir.join(format!("{}.wav", name))
+            } else {
+                let um_dir = lang_dir.join("_unmapped");
+                std::fs::create_dir_all(&um_dir)?;
+                um_dir.join(format!("{}.wav", wem_id))
             };
 
             // 跳过已存在的文件
