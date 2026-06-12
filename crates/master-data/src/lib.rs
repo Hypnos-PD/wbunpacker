@@ -1,171 +1,241 @@
-//! 主数据表导出模块
+//! MasterMemory 数据表导出模块
 //!
 //! # 概述
 //!
-//! `mastermemory.bytes` 是 Shadowverse: Worlds Beyond 的运行时数据库，
-//! 使用 MessagePack + LZ4 压缩编码。本模块将其解析为 JSON 格式的数据表。
+//! 解析游戏的 Master/mastermemory.bytes 文件，
+//! 将其中的 173 个 MasterMemory 表全部导出为 JSON。
 //!
-//! # 文件结构
+//! # 文件格式
 //!
-//! mastermemory.bytes 是一个 msgpack map，结构如下：
-//!
-//! ```text
-//! {
-//!   "TableName1": [offset, length],  ← TOC（目录表）
-//!   "TableName2": [offset, length],
-//!   ...
-//! }
-//! ```
-//!
-//! TOC 之后是各表的实际数据，每条记录是一个 msgpack array。
-//! 部分表的数据段使用 LZ4 压缩（ExtType 0xC8），需要先解压。
-//!
-//! # 语言差异
-//!
-//! - 简体中文 (CHS): 172 张表
-//! - 英文/日文/韩文/繁体中文: 173 张表（多了 `PrivateLobbyTag` 表）
-//!
-//! 五种语言的导出产物分别放在不同目录：
-//! - `data/exports/master-data-CHS/`
-//! - `data/exports/master-data-ENG/`
-//! - `data/exports/master-data-JPN/`
-//! - `data/exports/master-data-KOR/`
-//! - `data/exports/master-data-CHT/`
-//!
-//! # 关键表说明（WBArts 依赖的）
-//!
-//! | 表名 | 内容 | 被谁消费 |
-//! |------|------|----------|
-//! | BaseCardMaster | 攻/体、进化目标、类型 | WBArts cards.json |
-//! | CardText | 技能文本 Key 列表 | WBArts cards.json |
-//! | MasterTextLabel | 五语言文本映射 | WBArts cards.json |
-//! | CardStyleResource | card_style_id 映射 | WBArts cards.json |
-//! | CardResourceMaster | 语音事件映射 | WBArts / 语音 |
-//!
-//! # 与 C# 版本的区别
-//!
-//! 原 W2AU 的 C# 版使用 MasterMemory（编译期代码生成 + MessagePack-CSharp），
-//! 能按表名直接访问强类型数据。Rust 版采用通用 msgpack 解析器，
-//! 输出原始 JSON array，不做额外的类型映射。
+//! 与 manifest 相同的 MasterMemory 二进制格式：
+//! 1. msgpack 编码的 TOC，末尾附加 16 字节 MD5
+//! 2. TOC 顶层是 map，key 是表名，value 是 [offset, length]
+//! 3. offset 相对于 TOC 结束位置（切片时须用原始数据含 MD5，
+//!    因为最后一张表可能延伸进 MD5 区域）
+//! 4. 表数据：直接 msgpack 数组（小表）或 Ext(99) LZ4 压缩（大表）
 
-use anyhow::Context;
-use serde_json::Value as JsonValue;
+use anyhow::{anyhow, Context};
+use rmpv::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-// ============================================================================
-// 常量
-// ============================================================================
-
-/// 主数据表的语言后缀映射
-pub const LANG_SUFFIX: &[(&str, &str)] = &[
-    ("chs", "CHS"),
-    ("eng", "ENG"),
-    ("jpn", "JPN"),
-    ("kor", "KOR"),
-    ("cht", "CHT"),
-];
-
-/// MessagePack LZ4 压缩标记（ExtType code）
-///
-/// 当 msgpack 数据以 ExtType 0xC8 出现时，
-/// 表示后续数据是 LZ4 压缩的，需要先解压再解析。
-const LZ4_EXT_CODE: i8 = -56; // 0xC8 as signed i8
-
-// ============================================================================
+// ---------------------------------------------------------------------------
 // 数据结构
-// ============================================================================
+// ---------------------------------------------------------------------------
 
-/// 主数据表的导出结果。
+/// 单表导出结果
+#[derive(Debug)]
 pub struct ExportResult {
-    /// 表名
     pub name: String,
-    /// 记录数
-    pub row_count: usize,
-    /// 输出文件大小（字节）
-    pub file_size: u64,
+    pub rows: usize,
+    pub path: String,
 }
 
-// ============================================================================
-// 公共 API
-// ============================================================================
+// ---------------------------------------------------------------------------
+// TOC 解析
+// ---------------------------------------------------------------------------
 
-/// 解析一个 mastermemory.bytes 文件，导出所有表为 JSON。
+/// 解析 MasterMemory 文件的 TOC。
 ///
-/// # 处理流程
-///
-/// 1. 读取二进制文件
-/// 2. 用 msgpack streaming 解析 TOC（目录表）
-/// 3. 遍历 TOC 中的每个表名和 offset/length
-/// 4. 从对应 offset 读取表数据段
-/// 5. 如果数据段是 LZ4 ExtType，先解压
-/// 6. 用 msgpack 解析数据段为 JSON array
-/// 7. 每张表写入独立的 JSON 文件
-///
-/// # 参数
-/// - `input`: mastermemory.bytes 文件路径
-/// - `output_dir`: JSON 输出目录（如 data/exports/master-data-CHS/）
-/// - `lang`: 语言标识（用于日志，不影响解析逻辑）
-pub fn export_tables(input: &Path, output_dir: &Path, lang: &str) -> anyhow::Result<Vec<ExportResult>> {
-    todo!("实现主数据表解析: lang={lang}")
+/// 返回 (toc_end, tables)：
+/// - toc_end: TOC msgpack 体结束的字节位置
+/// - tables: 表名到 (offset, length) 的映射（offset 相对于 toc_end）
+pub fn parse_toc(raw: &[u8]) -> anyhow::Result<(usize, BTreeMap<String, (usize, usize)>)> {
+    if raw.len() < 16 {
+        return Err(anyhow!("数据太短: {} 字节", raw.len()));
+    }
+
+    let body = &raw[..raw.len() - 16];
+    let mut cursor = &body[..];
+    let root = rmpv::decode::value::read_value(&mut cursor)
+        .with_context(|| "TOC msgpack 解码失败")?;
+    let toc_end = body.len() - cursor.len();
+
+    let map = root
+        .as_map()
+        .ok_or_else(|| anyhow!("TOC 根结构不是 map"))?;
+
+    let mut tables = BTreeMap::new();
+    for (k, v) in map {
+        let name = k
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{:?}", k));
+        let pair = v
+            .as_array()
+            .ok_or_else(|| anyhow!("TOC entry '{}' 不是数组", name))?;
+        if pair.len() < 2 {
+            return Err(anyhow!("TOC entry '{}' 字段不足", name));
+        }
+        let off = pair[0].as_i64().unwrap_or(0) as usize;
+        let len = match &pair[1] {
+            Value::Integer(i) => i.as_i64().unwrap_or(0) as usize,
+            _ => 0,
+        };
+        tables.insert(name, (off, len));
+    }
+
+    Ok((toc_end, tables))
 }
 
-/// 尝试对 msgpack 数据做 LZ4 解压。
+// ---------------------------------------------------------------------------
+// 表提取
+// ---------------------------------------------------------------------------
+
+/// 从原始数据中提取并解压一张表。
 ///
-/// LZ4 压缩的 msgpack 格式为：
-/// ```text
-/// ExtType { code: 0xC8, data: [9 header bytes + LZ4 payload] }
-/// ```
-///
-/// 前 9 字节是 LZ4 解码所需的 header（由游戏引擎的 MessagePack-LZ4 编码器生成）。
-///
-/// # 返回
-/// 如果数据是 LZ4 ExtType 则返回解压后的字节，否则返回原始数据。
-fn try_lz4_decompress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    todo!("LZ4 解压逻辑实现")
+/// 使用含 MD5 的 raw 切片，因为最后一张表可能延伸进 MD5 区域。
+pub fn extract_table(
+    raw: &[u8],
+    toc_end: usize,
+    off: usize,
+    len: usize,
+    name: &str,
+) -> anyhow::Result<Vec<Value>> {
+    let actual = toc_end + off;
+    let table_data = raw
+        .get(actual..actual + len)
+        .ok_or_else(|| anyhow!("表 '{}' 偏移越界: {} + {} > {}", name, actual, len, raw.len()))?;
+
+    let value = rmpv::decode::value::read_value(&mut &table_data[..])
+        .with_context(|| format!("表 '{}' msgpack 解码失败", name))?;
+
+    match value {
+        Value::Ext(99, ref ext_data) => {
+            let mut cursor = &ext_data[..];
+            rmpv::decode::value::read_value(&mut cursor)
+                .with_context(|| format!("表 '{}' 元数据解码失败", name))?;
+            let skip = ext_data.len() - cursor.len();
+            let compressed = &ext_data[skip..];
+
+            let max_size = compressed.len() * 100;
+            let decompressed = lz4_flex::block::decompress(compressed, max_size)
+                .with_context(|| format!("表 '{}' LZ4 解压失败", name))?;
+
+            let rows = rmpv::decode::value::read_value(&mut &decompressed[..])
+                .with_context(|| format!("表 '{}' 解压后 msgpack 解码失败", name))?;
+
+            rows.as_array()
+                .cloned()
+                .ok_or_else(|| anyhow!("表 '{}' 解压后不是 msgpack 数组", name))
+        }
+        Value::Array(rows) => Ok(rows),
+        other => Err(anyhow!("表 '{}' 格式不支持: {:?}", name, other)),
+    }
 }
 
-/// 将 msgpack 编码的数组数据解析为 JSON Value。
-///
-/// 主数据表的每条记录都是 msgpack array（如 [10113100, "ドラゴン", ...]），
-/// 整个表是 array 的 array。
-fn parse_table_rows(data: &[u8]) -> anyhow::Result<JsonValue> {
-    todo!("msgpack → JSON 行解析")
+// ---------------------------------------------------------------------------
+// JSON 转换
+// ---------------------------------------------------------------------------
+
+fn to_json_value(v: &Value) -> serde_json::Value {
+    match v {
+        Value::Nil => serde_json::Value::Null,
+        Value::Boolean(b) => serde_json::Value::Bool(*b),
+        Value::Integer(i) => {
+            if let Some(n) = i.as_i64() {
+                serde_json::Value::Number(n.into())
+            } else if let Some(n) = i.as_u64() {
+                serde_json::Value::Number(n.into())
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        Value::F32(f) => serde_json::json!(*f),
+        Value::F64(f) => serde_json::json!(*f),
+        Value::String(s) => match s.as_str() {
+            Some(utf8) => serde_json::Value::String(utf8.to_string()),
+            None => serde_json::Value::String(
+                String::from_utf8_lossy(s.as_bytes()).into_owned(),
+            ),
+        },
+        Value::Binary(b) => serde_json::Value::Array(
+            b.iter().map(|&x| serde_json::Value::Number(x.into())).collect(),
+        ),
+        Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(to_json_value).collect())
+        }
+        Value::Map(map) => {
+            let obj: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (format!("{:?}", to_json_value(k)), to_json_value(v)))
+                .collect();
+            serde_json::Value::Object(obj)
+        }
+        Value::Ext(_, data) => serde_json::Value::Array(
+            data.iter().map(|&x| serde_json::Value::Number(x.into())).collect(),
+        ),
+    }
 }
 
-// ============================================================================
-// 多语言批量导出
-// ============================================================================
+// ---------------------------------------------------------------------------
+// 批量导出
+// ---------------------------------------------------------------------------
 
-/// 从缓存目录批量导出所有语言的主数据表。
+/// 导出所有表到指定目录。
 ///
-/// 缓存目录中应包含以下文件：
-/// - mastermemory.bytes       (CHS)
-/// - mastermemory_Eng.bytes    (ENG)
-/// - mastermemory_Jpn.bytes    (JPN)
-/// - mastermemory_Kor.bytes    (KOR)
-/// - mastermemory_Cht.bytes    (CHT)
-///
-/// 日语版（JPN）的 mastermemory.bytes 不在缓存中（因原 W2AU 的
-/// download 流程中，日文版后缀为空，直接从 manifest 下载原始文件）。
-/// 如需导出日文，需用 `export_tables` 单独指定输入。
-pub fn export_all_langs(cache_dir: &Path, output_base: &Path) -> anyhow::Result<BTreeMap<String, Vec<ExportResult>>> {
-    todo!("多语言批量导出实现")
+/// - raw: 完整的 mastermemory.bytes 原始数据（含 MD5）
+/// - output_dir: 输出目录，每个表一个 JSON 文件
+pub fn export_all(raw: &[u8], output_dir: &Path) -> anyhow::Result<Vec<ExportResult>> {
+    let (toc_end, tables) = parse_toc(raw)?;
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("无法创建输出目录: {}", output_dir.display()))?;
+
+    let total = tables.len();
+    tracing::info!("导出 {} 个表到 {}", total, output_dir.display());
+
+    let mut results = Vec::with_capacity(total);
+
+    for (name, (off, len)) in &tables {
+        let rows = extract_table(raw, toc_end, *off, *len, name)?;
+        let json_rows: Vec<serde_json::Value> = rows.iter().map(|r| to_json_value(r)).collect();
+
+        let json = serde_json::to_string_pretty(&json_rows)
+            .with_context(|| format!("表 '{}' JSON 序列化失败", name))?;
+
+        let path = output_dir.join(format!("{}.json", name));
+        std::fs::write(&path, json)
+            .with_context(|| format!("无法写入: {}", path.display()))?;
+
+        tracing::debug!("  {}: {} 行", name, rows.len());
+        results.push(ExportResult {
+            name: name.clone(),
+            rows: rows.len(),
+            path: path.display().to_string(),
+        });
+    }
+
+    Ok(results)
 }
 
-// ============================================================================
+// ---------------------------------------------------------------------------
 // 测试
-// ============================================================================
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmpv::encode;
 
-    /// 验证语言后缀映射的完整性
     #[test]
-    fn test_lang_suffix_count() {
-        assert_eq!(LANG_SUFFIX.len(), 5, "应包含 5 种语言");
-        assert!(LANG_SUFFIX.iter().any(|(k, _)| *k == "chs"));
-        assert!(LANG_SUFFIX.iter().any(|(k, _)| *k == "eng"));
+    fn test_parse_toc() {
+        let mut body = Vec::new();
+        encode::write_value(
+            &mut body,
+            &Value::Map(vec![(
+                Value::String("TestTable".into()),
+                Value::Array(vec![
+                    Value::Integer(0.into()),
+                    Value::Integer((10_i64).into()),
+                ]),
+            )]),
+        )
+        .unwrap();
+        body.extend_from_slice(&[0u8; 16]);
+
+        let (toc_end, tables) = parse_toc(&body).unwrap();
+        assert!(toc_end > 0);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables["TestTable"], (0, 10));
     }
 }
