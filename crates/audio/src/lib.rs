@@ -174,6 +174,8 @@ pub fn wem_to_wav(
         .arg("-o")
         .arg(output)
         .arg(&tmp)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .with_context(|| format!("无法执行 vgmstream: {}", vgmstream_path.display()))?;
 
