@@ -24,6 +24,7 @@
 //! ```
 
 use anyhow::Context;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -258,20 +259,37 @@ pub fn extract_all(
     stats.pck_files = pck_files.len();
     tracing::info!("扫描到 {} 个 .pck 文件", pck_files.len());
 
+    // 先统计总 WEM 数，用于进度条
+    let mut total_wem = 0usize;
+    let mut pck_entries: Vec<(&std::path::PathBuf, Vec<u8>, HashMap<u32, u32>)> = Vec::new();
     for pck_path in &pck_files {
         let data = std::fs::read(pck_path)
             .with_context(|| format!("无法读取: {}", pck_path.display()))?;
-
         let entries = parse_akpk(&data);
+        total_wem += entries.len();
+        pck_entries.push((pck_path, data, entries));
+    }
+
+    let pb = ProgressBar::new(total_wem as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}"
+        )
+        .unwrap()
+        .progress_chars("##-"),
+    );
+
+    for (_pck_path, data, entries) in &pck_entries {
         if entries.is_empty() {
             continue;
         }
 
-        for (wem_id, offset) in &entries {
-            let wem_data = match extract_wem(&data, *offset) {
+        for (wem_id, offset) in entries {
+            let wem_data = match extract_wem(data, *offset) {
                 Some(d) => d,
                 None => {
                     stats.failed += 1;
+                    pb.inc(1);
                     continue;
                 }
             };
@@ -288,9 +306,11 @@ pub fn extract_all(
             // 跳过已存在的文件
             if out_path.exists() {
                 stats.skipped += 1;
+                pb.inc(1);
                 continue;
             }
 
+            pb.set_message(format!("wem {}", wem_id));
             match wem_to_wav(wem_data, &out_path, vgmstream_path) {
                 Ok(()) => {
                     stats.wav_output += 1;
@@ -300,8 +320,11 @@ pub fn extract_all(
                     stats.failed += 1;
                 }
             }
+            pb.inc(1);
         }
     }
+
+    pb.finish_and_clear();
 
     tracing::info!(
         "音频提取完成: {} pck, {} WAV 输出, {} 跳过, {} 失败",

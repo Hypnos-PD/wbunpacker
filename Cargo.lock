@@ -173,6 +173,7 @@ dependencies = [
  "aes",
  "anyhow",
  "cbc",
+ "indicatif",
  "serde",
  "serde_json",
  "tracing",
