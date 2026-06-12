@@ -50,7 +50,11 @@ enum Command {
     },
 
     /// 提取音频: 解密 Wwise 映射 → 解析 AKPK → WEM 提取 → WAV 输出
-    Audio,
+    Audio {
+        /// 同时转码 MP3
+        #[arg(long)]
+        mp3: bool,
+    },
 
     /// 处理卡图纹理 (骨架)
     Texture {
@@ -253,7 +257,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Audio => {
+        Command::Audio { mp3 } => {
             let cfg = config::load()?;
             let vgmstream_path = std::path::Path::new(&cfg.vgmstream_path);
 
@@ -276,6 +280,14 @@ async fn main() -> anyhow::Result<()> {
 
             println!("pck: {} | WAV: {} | 跳过: {} | 失败: {}",
                 stats.pck_files, stats.wav_output, stats.skipped, stats.failed);
+
+            if mp3 {
+                let mp3_dir = std::path::Path::new(&cfg.data_dir)
+                    .join("exports").join("audio-mp3");
+                println!("转码 MP3 → {}", mp3_dir.display());
+                let n = audio::convert_dir_to_mp3(&output_dir, &mp3_dir, &cfg.ffmpeg_path)?;
+                println!("MP3 完成: {n} 个文件");
+            }
         }
         Command::Texture { .. } => todo!("texture"),
         Command::Metadb { .. } => todo!("metadb"),
