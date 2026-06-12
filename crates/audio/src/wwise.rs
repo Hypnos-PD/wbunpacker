@@ -206,14 +206,15 @@ pub fn extract_banks_from_pck(pck_data: &[u8]) -> Vec<Vec<u8>> {
 
 /// 解析 bank 的 HIRC 段，构建 wem_id → event_id 映射链。
 ///
-/// HIRC 对象类型（Wwise 2022）：
-/// - 0x02: CAkSound — AkMediaInformation.tid = wem_id
-/// - 0x03: CAkEvent — Action.tid = action_id
-/// - 0x04: CAkActionPlay — idExt = sound_id
+/// HIRC 对象类型（Wwise 2022, v154）：
+/// - 0x02: CAkSound — sourceID (wem_id)
+/// - 0x03: CAkAction — idExt (sound_id)
+/// - 0x04: CAkEvent — action_id 列表
+///
+/// 布局均来自对照 wwiser 源码的字段顺序读取，非标记匹配。
 ///
 /// 映射链: wem_id → sound_id → action_id → event_id
 pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
-    // 查找 HIRC chunk
     let hirc_off = match find_chunk(bank_data, chunk_id::HIRC) {
         Some(o) => o,
         None => return BTreeMap::new(),
@@ -228,60 +229,78 @@ pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
         bank_data[hirc_off + 10], bank_data[hirc_off + 11],
     ]) as usize;
 
-    let mut offset = hirc_off + 12;
+    let mut pos = hirc_off + 12;
     let mut wem_to_sound: BTreeMap<u32, u32> = BTreeMap::new();
     let mut sound_to_action: BTreeMap<u32, u32> = BTreeMap::new();
     let mut action_to_event: BTreeMap<u32, u32> = BTreeMap::new();
 
     for _ in 0..count {
-        if offset + 5 > bank_data.len() {
+        if pos + 9 > bank_data.len() {
             break;
         }
 
-        let obj_type = bank_data[offset];
-        let obj_len = u32::from_le_bytes([
-            bank_data[offset + 1], bank_data[offset + 2],
-            bank_data[offset + 3], bank_data[offset + 4],
+        let obj_type = bank_data[pos];
+        let dw_section_size = u32::from_le_bytes([
+            bank_data[pos + 1], bank_data[pos + 2],
+            bank_data[pos + 3], bank_data[pos + 4],
         ]) as usize;
+        let _obj_id = u32::from_le_bytes([
+            bank_data[pos + 5], bank_data[pos + 6],
+            bank_data[pos + 7], bank_data[pos + 8],
+        ]);
 
-        let obj_id = if offset + 9 <= bank_data.len() {
-            u32::from_le_bytes([
-                bank_data[offset + 5], bank_data[offset + 6],
-                bank_data[offset + 7], bank_data[offset + 8],
-            ])
-        } else {
-            break;
-        };
-
-        let data_start = offset + 9;
-        let data_end = (data_start + obj_len.saturating_sub(4)).min(bank_data.len());
+        // 类型特定数据: 从 obj_id 之后 (pos+9)，长度 = dwSectionSize - 4
+        let data_start = pos + 9;
+        let data_len = dw_section_size.saturating_sub(4);
+        let data_end = (data_start + data_len).min(bank_data.len());
 
         match obj_type {
             0x02 => {
-                // CAkSound: 搜索 AkMediaInformation → tid (wem_id)
-                if let Some(wem_id) = find_nested_u32_at(&bank_data[data_start..data_end], b"tid ") {
-                    wem_to_sound.insert(wem_id, obj_id);
+                // CAkSound (v154):
+                //   [0..4): plugin_id (u32)
+                //   [4]:    StreamType (u8)
+                //   [5..9): sourceID / wem_id (u32)
+                if data_len >= 9 {
+                    let wem_id = read_u32_le(&bank_data[data_start + 5..]);
+                    wem_to_sound.insert(wem_id, _obj_id);
                 }
             }
             0x03 => {
-                // CAkEvent: 搜索 Action → tid (action_id)
-                if let Some(action_id) = find_nested_u32_at(&bank_data[data_start..data_end], b"tid ") {
-                    action_to_event.insert(action_id, obj_id);
+                // CAkAction (v154):
+                //   [0..4): ulID / action_id (u32)
+                //   [4..6): ulActionType (u16)
+                //   [6..10): idExt / sound_id (u32)
+                if data_len >= 10 {
+                    let action_id = read_u32_le(&bank_data[data_start..]);
+                    let sound_id = read_u32_le(&bank_data[data_start + 6..]);
+                    sound_to_action.insert(sound_id, action_id);
                 }
             }
             0x04 => {
-                // CAkActionPlay: 搜索 idExt (sound_id)
-                if let Some(sound_id) = find_nested_u32_at(&bank_data[data_start..data_end], b"idEx") {
-                    sound_to_action.insert(sound_id, obj_id);
+                // CAkEvent (v154):
+                //   [0..4): ulID / event_id (u32)
+                //   [4..):  var(ulActionListSize) + action_ids (u32 each)
+                if data_len >= 4 {
+                    let event_id = read_u32_le(&bank_data[data_start..]);
+                    // 读取 var 编码的 action 列表长度
+                    let (action_count, var_bytes) = read_var_u32(&bank_data[data_start + 4..]);
+                    let list_start = data_start + 4 + var_bytes;
+                    for i in 0..action_count as usize {
+                        let off = list_start + i * 4;
+                        if off + 4 <= data_end {
+                            let action_id = read_u32_le(&bank_data[off..]);
+                            action_to_event.insert(action_id, event_id);
+                        }
+                    }
                 }
             }
             _ => {}
         }
 
-        offset = data_end;
+        pos = data_end;
     }
 
-    // 组装: wem_id → sound_id → action_id → event_id
+    // 组装映射链: wem_id → sound_id → action_id → event_id
     let mut result = BTreeMap::new();
     for (wem_id, sound_id) in &wem_to_sound {
         if let Some(action_id) = sound_to_action.get(sound_id) {
@@ -294,19 +313,33 @@ pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
     result
 }
 
-/// 在 data 中搜索 marker 后紧跟的 u32 LE 值。
-///
-/// wwiser 的二进制格式中，字段由 type(1) + size(2) + data 组成。
-/// 这里简化为裸字节搜索，对我们需要的那几个字段足够。
-fn find_nested_u32_at(data: &[u8], marker: &[u8]) -> Option<u32> {
-    data.windows(marker.len() + 4)
-        .find(|w| &w[..marker.len()] == marker)
-        .map(|w| {
-            u32::from_le_bytes([
-                w[marker.len()], w[marker.len() + 1],
-                w[marker.len() + 2], w[marker.len() + 3],
-            ])
-        })
+/// 从字节切片读取 u32 LE，不足 4 字节返回 0。
+fn read_u32_le(data: &[u8]) -> u32 {
+    if data.len() < 4 {
+        return 0;
+    }
+    u32::from_le_bytes([data[0], data[1], data[2], data[3]])
+}
+
+/// Wwise 可变长度整数编码（对照 wwiser TYPE_VAR）：
+/// - 读 u8，取低 7 位
+/// - 若高位为 1，继续读下一个 u8，value = (value << 7) | (next & 0x7F)
+/// 返回 (解码值, 消耗字节数)
+fn read_var_u32(data: &[u8]) -> (u32, usize) {
+    let mut value = 0u32;
+    let mut bytes = 0usize;
+    loop {
+        if bytes >= data.len() || bytes >= 10 {
+            break;
+        }
+        let cur = data[bytes];
+        bytes += 1;
+        value = (value << 7) | ((cur & 0x7F) as u32);
+        if cur & 0x80 == 0 {
+            break;
+        }
+    }
+    (value, bytes)
 }
 
 /// 在字节切片中搜索 chunk ID（大端序 4 字节）。
@@ -315,29 +348,142 @@ fn find_chunk(data: &[u8], id: u32) -> Option<usize> {
     data.windows(4).position(|w| w == be)
 }
 
-/// 完整管线：解密事件表 → 从 pck 提取 bank → 解析 HIRC → wem_id → event_name。
+/// 完整管线：从多个 pck 文件构建全局 wem_id → event_name 映射。
+///
+/// 因为 HIRC 的 Sound/Action/Event 对象分散在不同 bank 甚至不同 pck 中，
+/// 必须先全局收集所有 bank 的 wem→sound、sound→action、action→event 映射，
+/// 再统一关联。
 ///
 /// # 参数
 /// - `mapping_data`: WwiseIdMapping.bytes 的原始加密数据
-/// - `pck_data`: 单个 .pck 文件内容
-pub fn build_wem_mapping_for_pck(
+/// - `pck_data_list`: 多个 .pck 文件的 (路径, 数据)
+pub fn build_global_wem_mapping(
     mapping_data: &[u8],
-    pck_data: &[u8],
+    pck_data_list: &[(&std::path::Path, &[u8])],
 ) -> anyhow::Result<BTreeMap<u32, String>> {
     let event_table = decrypt_wwise_event_table(mapping_data)?;
-    let banks = extract_banks_from_pck(pck_data);
 
+    // 全局收集
+    let mut wem_to_sound: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut sound_to_action: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut action_to_event: BTreeMap<u32, u32> = BTreeMap::new();
+
+    for (_pck_path, pck_data) in pck_data_list {
+        let banks = extract_banks_from_pck(pck_data);
+        for bank in &banks {
+            collect_hirc_mappings(
+                bank,
+                &mut wem_to_sound,
+                &mut sound_to_action,
+                &mut action_to_event,
+            );
+        }
+    }
+
+    // 全局关联: wem_id → sound_id → action_id → event_id → event_name
     let mut result = BTreeMap::new();
-    for bank in &banks {
-        let wem_to_event = parse_bank_hirc(bank);
-        for (wem_id, event_id) in &wem_to_event {
-            if let Some(name) = event_table.get(event_id) {
-                result.insert(*wem_id, name.clone());
+    for (wem_id, sound_id) in &wem_to_sound {
+        if let Some(action_id) = sound_to_action.get(sound_id) {
+            if let Some(event_id) = action_to_event.get(action_id) {
+                if let Some(name) = event_table.get(event_id) {
+                    result.insert(*wem_id, name.clone());
+                }
             }
         }
     }
 
+    tracing::info!(
+        "全局映射: {} wem→sound, {} sound→action, {} action→event → {} wem→name",
+        wem_to_sound.len(),
+        sound_to_action.len(),
+        action_to_event.len(),
+        result.len()
+    );
+
     Ok(result)
+}
+
+/// 从单个 bank 提取 HIRC 映射，追加到全局集合。
+fn collect_hirc_mappings(
+    bank_data: &[u8],
+    wem_to_sound: &mut BTreeMap<u32, u32>,
+    sound_to_action: &mut BTreeMap<u32, u32>,
+    action_to_event: &mut BTreeMap<u32, u32>,
+) {
+    let hirc_off = match find_chunk(bank_data, chunk_id::HIRC) {
+        Some(o) => o,
+        None => return,
+    };
+
+    if hirc_off + 12 > bank_data.len() {
+        return;
+    }
+
+    let count = u32::from_le_bytes([
+        bank_data[hirc_off + 8], bank_data[hirc_off + 9],
+        bank_data[hirc_off + 10], bank_data[hirc_off + 11],
+    ]) as usize;
+
+    let mut pos = hirc_off + 12;
+
+    for _ in 0..count {
+        if pos + 9 > bank_data.len() {
+            break;
+        }
+
+        let obj_type = bank_data[pos];
+        let dw_section_size = u32::from_le_bytes([
+            bank_data[pos + 1], bank_data[pos + 2],
+            bank_data[pos + 3], bank_data[pos + 4],
+        ]) as usize;
+        let _obj_id = u32::from_le_bytes([
+            bank_data[pos + 5], bank_data[pos + 6],
+            bank_data[pos + 7], bank_data[pos + 8],
+        ]);
+
+        let data_start = pos + 9;
+        let data_len = dw_section_size.saturating_sub(4);
+        let data_end = (data_start + data_len).min(bank_data.len());
+
+        match obj_type {
+            0x02 => {
+                // CAkSound: wem_id at +5 (after plugin_id u32 + StreamType u8)
+                if data_len >= 9 {
+                    let wem_id = read_u32_le(&bank_data[data_start + 5..]);
+                    wem_to_sound.insert(wem_id, _obj_id);
+                }
+            }
+            0x03 => {
+                // CAkAction: action_id at +0, sound_id (idExt) at +6
+                if data_len >= 10 {
+                    let action_id = read_u32_le(&bank_data[data_start..]);
+                    let sound_id = read_u32_le(&bank_data[data_start + 6..]);
+                    sound_to_action.insert(sound_id, action_id);
+                }
+            }
+            0x04 => {
+                // CAkEvent: event_id at +0, then var(actionCount), then action_ids
+                if data_len >= 4 {
+                    let event_id = read_u32_le(&bank_data[data_start..]);
+                    let (action_count, var_bytes) =
+                        read_var_u32(&bank_data[data_start + 4..]);
+                    let list_start = data_start + 4 + var_bytes;
+                    let available = data_end.saturating_sub(list_start) / 4;
+                    let limit = action_count.min(available as u32);
+                    for i in 0..limit as usize {
+                        let off = list_start + i * 4;
+                        if off + 4 <= data_end {
+                            let action_id = read_u32_le(&bank_data[off..]);
+                            action_to_event.insert(action_id, event_id);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        pos = data_end;
+    }
 }
 
 // ============================================================================
@@ -361,5 +507,62 @@ mod tests {
             Some(&"Play_fx_smn_10244120_1".to_string()),
             "已知事件 ID 不匹配"
         );
+    }
+
+    /// 验证 CAkSound 解析能从真实数据读出 wem_id
+    #[test]
+    fn test_parse_caksound_wem_id() {
+        let pck_path = "D:/WBUnpacker/variants/Chs/raw-assets/sound/Windows/d/English(US)/dx_10001110.pck";
+        let pck_data = std::fs::read(pck_path).expect("请先下载 pck 文件");
+        let banks = extract_banks_from_pck(&pck_data);
+        assert!(!banks.is_empty());
+
+        // 银行里应该有 CAkSound (type 0x02)，wem_id > 0x100000
+        let mut found_wem = false;
+        for bank in &banks {
+            let hirc = find_chunk(bank, chunk_id::HIRC).unwrap();
+            let count = u32::from_le_bytes([bank[hirc+8], bank[hirc+9], bank[hirc+10], bank[hirc+11]]) as usize;
+            let mut pos = hirc + 12;
+            for _ in 0..count {
+                let t = bank[pos];
+                let len = u32::from_le_bytes([bank[pos+1], bank[pos+2], bank[pos+3], bank[pos+4]]) as usize;
+                if t == 0x02 && len >= 13 {
+                    let wem_id = u32::from_le_bytes([bank[pos+14], bank[pos+15], bank[pos+16], bank[pos+17]]);
+                    assert!(wem_id > 0x100000, "wem_id 应在 Wwise 范围内: {}", wem_id);
+                    found_wem = true;
+                }
+                pos += 9 + len.saturating_sub(4);
+            }
+        }
+        assert!(found_wem, "未找到 CAkSound 的 wem_id");
+    }
+
+    /// 用 mx_*.pck（含完整 Sound+Action+Event 链）验证全管线
+    #[test]
+    fn test_hirc_full_chain() {
+        let mapping_path = "D:/WBUnpacker/blobs/raw/CZ/CZ6HQ5ZWKIQP6JOXC6REDJS3VQ";
+        let mapping_data = std::fs::read(mapping_path).expect("请先下载 WwiseIdMapping.bytes");
+
+        // mx_M60.pck 含 0x02+0x03+0x04 各 1 个
+        let pck_path = "D:/WBUnpacker/variants/Chs/raw-assets/sound/Windows/m/mx_M60.pck";
+        let pck_data = std::fs::read(pck_path).expect("请先下载 pck 文件");
+
+        let banks = extract_banks_from_pck(&pck_data);
+        assert!(!banks.is_empty(), "应提取出 bank");
+
+        let mut total = 0usize;
+        for bank in &banks {
+            let wem_to_event = parse_bank_hirc(bank);
+            total += wem_to_event.len();
+        }
+        assert!(total > 0, "应从 mx pck 解析出 wem→event 映射");
+
+        // 完整管线
+        let mapping = build_wem_mapping_for_pck(&mapping_data, &pck_data).unwrap();
+        assert!(!mapping.is_empty(), "完整管线应产出映射");
+        println!("完整管线产出 {} 个 wem→event 映射", mapping.len());
+        for (wem_id, name) in mapping.iter().take(3) {
+            println!("  {} → {}", wem_id, name);
+        }
     }
 }

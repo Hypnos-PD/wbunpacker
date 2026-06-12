@@ -279,26 +279,33 @@ pub fn extract_all(
         .progress_chars("##-"),
     );
 
+    // 先全局收集所有 pck 的 HIRC，构建跨 bank 的 wem→event 映射
+    let pck_refs: Vec<(&std::path::Path, &[u8])> = pck_entries
+        .iter()
+        .map(|(p, d, _)| (p.as_path(), d.as_slice()))
+        .collect();
+    let event_map = match wwise::build_global_wem_mapping(mapping_data, &pck_refs) {
+        Ok(m) => {
+            tracing::info!("全局 WEM 映射: {} 个条目", m.len());
+            m
+        }
+        Err(e) => {
+            tracing::error!("全局 HIRC 解析失败: {e}");
+            return Err(e);
+        }
+    };
+
     for (pck_path, data, entries) in &pck_entries {
         if entries.is_empty() {
             continue;
         }
 
-        // 每个 pck 独立解析 HIRC → wem_id → event_name
-        let event_map = match wwise::build_wem_mapping_for_pck(mapping_data, data) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("HIRC 解析失败 {}: {e}", pck_path.display());
-                BTreeMap::new()
-            }
-        };
-        let mapped = event_map.len();
-        let total = entries.len();
+        let mapped = entries.iter().filter(|(id, _)| event_map.contains_key(id)).count();
         tracing::debug!(
             "{}: {}/{} WEM 匹配到事件名",
             pck_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
             mapped,
-            total
+            entries.len()
         );
 
         for (wem_id, offset) in entries {
