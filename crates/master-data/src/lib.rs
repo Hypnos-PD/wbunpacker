@@ -215,7 +215,7 @@ pub fn export_all(raw: &[u8], output_dir: &Path) -> anyhow::Result<Vec<ExportRes
 
 /// cards_full.json 的单卡条目
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+
 struct CardFullEntry {
     card_id: i64,
     base_card_id: i64,
