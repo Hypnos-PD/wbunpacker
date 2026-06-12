@@ -289,7 +289,7 @@ pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
                         let off = list_start + i * 4;
                         if off + 4 <= data_end {
                             let action_id = read_u32_le(&bank_data[off..]);
-                            action_to_event.insert(action_id, event_id);
+                            action_to_event.insert(action_id, _obj_id);
                         }
                     }
                 }
@@ -454,17 +454,15 @@ fn collect_hirc_mappings(
                 }
             }
             0x03 => {
-                // CAkAction: action_id at +0, sound_id (idExt) at +6
+                // CAkAction: action_id = HIRC ulID, sound_id = data[+6] (idExt)
                 if data_len >= 10 {
-                    let action_id = read_u32_le(&bank_data[data_start..]);
                     let sound_id = read_u32_le(&bank_data[data_start + 6..]);
-                    sound_to_action.insert(sound_id, action_id);
+                    sound_to_action.insert(sound_id, _obj_id);
                 }
             }
             0x04 => {
-                // CAkEvent: event_id at +0, then var(actionCount), then action_ids
+                // CAkEvent: event_id = HIRC ulID, action_ids in data[+4..]
                 if data_len >= 4 {
-                    let event_id = read_u32_le(&bank_data[data_start..]);
                     let (action_count, var_bytes) =
                         read_var_u32(&bank_data[data_start + 4..]);
                     let list_start = data_start + 4 + var_bytes;
@@ -474,7 +472,7 @@ fn collect_hirc_mappings(
                         let off = list_start + i * 4;
                         if off + 4 <= data_end {
                             let action_id = read_u32_le(&bank_data[off..]);
-                            action_to_event.insert(action_id, event_id);
+                            action_to_event.insert(action_id, _obj_id);
                         }
                     }
                 }
