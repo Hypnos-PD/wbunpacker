@@ -1,0 +1,51 @@
+# Render coordinates are in final output pixels.
+# Defaults are derived from D:/Downloads/card/10001110.png with a uniform
+# height scale: 687 -> 1024 (1.4905386x). The unpacked illustration remains
+# 848x1024, but the complete card frame uses the official card aspect ratio.
+
+[canvas]
+width = 790
+height = 1024
+# Transparent background. Use [255, 255, 255, 255] if a white web-style background is preferred.
+background = [255, 255, 255, 0]
+
+[art]
+# Draw card art only inside the visible card window, so it does not leak outside the frame.
+x = 98
+y = 194
+width = 590
+height = 711
+
+# Source region from the unpacked 848x1024 illustration. Defaults to the full image;
+# use [art] x/y/width/height for placement and let the frame cover the edges.
+crop_x = 0
+crop_y = 0
+crop_width = 848
+crop_height = 1024
+
+[frame]
+x = 0
+y = 0
+width = 782
+height = 1024
+
+[name]
+center_x = 406
+center_y = 146
+font_size = 60
+max_width = 337
+
+[cost]
+center_x = 96
+center_y = 122
+font_size = 150
+
+[attack]
+center_x = 102
+center_y = 890
+font_size = 150
+
+[defense]
+center_x = 682
+center_y = 882
+font_size = 150

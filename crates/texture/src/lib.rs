@@ -29,12 +29,16 @@
 //!   Token/
 //! `
 
+use ab_glyph::{FontArc, PxScale};
 use anyhow::Context;
+use image::{DynamicImage, Rgba, RgbaImage};
+use imageproc::drawing::{draw_text_mut, text_size};
 use indicatif::{ProgressBar, ProgressStyle};
 use manifest::Manifest;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{debug, info};
+use tracing::debug;
 
 // ============================================================================
 // 常量
@@ -46,9 +50,11 @@ const UNITY_VERSION: &str = "2022.3.62f2";
 /// Card/Textures 在 manifest 中的路径前缀
 const CARD_TEXTURES_PREFIX: &str = "Assets/_Wizard2Resources/Card/Textures/";
 
+/// Card2D 边框资源目录。
+const CARD_FRAME_SOURCE_DIR: &str = "UI/Card2D";
+
 /// 需要跳过的子路径
 const SKIP_PATTERNS: &[&str] = &["HighFoil"];
-
 
 // ============================================================================
 // 公共 API
@@ -69,7 +75,10 @@ pub fn process_card_textures(
     let expected_count = count_card_entries(data_dir)?;
     let existing = count_raw_dirs(&raw_dir);
     if existing >= expected_count {
-        println!("跳过 AssetStudio 导出（已有 {} 个目录，预期 {}）", existing, expected_count);
+        println!(
+            "跳过 AssetStudio 导出（已有 {} 个目录，预期 {}）",
+            existing, expected_count
+        );
     } else {
         println!("AssetStudio 导出（预期 {} 个卡图）...", expected_count);
         run_asset_studio(data_dir, &raw_dir, asset_studio_path)?;
@@ -78,12 +87,17 @@ pub fn process_card_textures(
     // 第二步: 分类
     let png_count = count_categorized(&output_dir);
     if png_count >= expected_count {
-        println!("跳过分类（已有 {} 个 PNG，预期 {}）", png_count, expected_count);
+        println!(
+            "跳过分类（已有 {} 个 PNG，预期 {}）",
+            png_count, expected_count
+        );
     } else {
         println!("分类到 Main/Special/Token...");
         let r = categorize(&raw_dir, &output_dir)?;
-        println!("   Main={} Special={} Token={} (共 {} PNG)",
-            r.by_main, r.by_special, r.by_token, r.png_count);
+        println!(
+            "   Main={} Special={} Token={} (共 {} PNG)",
+            r.by_main, r.by_special, r.by_token, r.png_count
+        );
         // 清理 _raw 目录（已分类完成）
         let _ = std::fs::remove_dir_all(&raw_dir);
     }
@@ -108,11 +122,76 @@ pub fn process_card_textures(
 /// 提取卡包UI图标: 从解密 AssetBundle 中提取 utx_ic_item_10000~10007 → PNG。
 ///
 /// 增量: 已存在的 PNG 跳过。
-pub fn process_pack_icons(
-    data_dir: &Path,
-    asset_studio_path: &Path,
-) -> anyhow::Result<()> {
+pub fn process_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
     extract_pack_icons(data_dir, asset_studio_path)
+}
+
+/// 提取 Card2D 卡牌边框 PNG。
+pub fn process_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
+    extract_card_frames(data_dir, asset_studio_path)
+}
+
+/// 渲染单张完整卡牌图。
+pub fn render_card_image(
+    data_dir: &Path,
+    card_id: i64,
+    variant: &str,
+    name_font_path: Option<&Path>,
+    number_font_path: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    let cards = load_cards(data_dir)?;
+    let base_stats = load_base_stats(data_dir)?;
+    let card = cards
+        .iter()
+        .find(|c| c.card_id == card_id)
+        .ok_or_else(|| anyhow::anyhow!("cards_full.json 中未找到 card_id={card_id}"))?;
+    render_one_card(
+        data_dir,
+        card,
+        &base_stats,
+        variant,
+        name_font_path,
+        number_font_path,
+    )
+}
+
+/// 批量渲染 cards_full.json 中当前支持的卡牌。
+pub fn render_all_card_images(
+    data_dir: &Path,
+    variant: &str,
+    name_font_path: Option<&Path>,
+    number_font_path: Option<&Path>,
+) -> anyhow::Result<RenderStats> {
+    let cards = load_cards(data_dir)?;
+    let base_stats = load_base_stats(data_dir)?;
+    let pb = ProgressBar::new(cards.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("{spinner} [{bar:30}] {pos}/{len} 渲染 {msg}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    let mut stats = RenderStats::default();
+    for card in &cards {
+        pb.set_message(card.card_id.to_string());
+        match render_one_card(
+            data_dir,
+            card,
+            &base_stats,
+            variant,
+            name_font_path,
+            number_font_path,
+        ) {
+            Ok(_) => stats.rendered += 1,
+            Err(e) => {
+                debug!("跳过 card_id={}: {e}", card.card_id);
+                stats.skipped += 1;
+            }
+        }
+        pb.inc(1);
+    }
+    pb.finish_and_clear();
+    Ok(stats)
 }
 
 // ============================================================================
@@ -128,7 +207,8 @@ fn count_card_entries(data_dir: &Path) -> anyhow::Result<usize> {
     let json = std::fs::read_to_string(&manifest_path)
         .context("请先运行: wbu manifest -v Chs --format json")?;
     let m: Manifest = serde_json::from_str(&json)?;
-    Ok(m.assets.iter()
+    Ok(m.assets
+        .iter()
         .filter(|a| a.name.starts_with(CARD_TEXTURES_PREFIX))
         .filter(|a| !SKIP_PATTERNS.iter().any(|p| a.name.contains(p)))
         .count())
@@ -148,7 +228,8 @@ fn count_raw_dirs(raw_dir: &Path) -> usize {
 
 /// 统计 Main/Special/Token 目录下的 PNG 总数。
 fn count_categorized(output_dir: &Path) -> usize {
-    ["Main", "Special", "Token"].iter()
+    ["Main", "Special", "Token"]
+        .iter()
         .map(|d| count_pngs_recursive(&output_dir.join(d)))
         .sum()
 }
@@ -197,21 +278,26 @@ fn run_asset_studio(
     // Spinner（AssetStudio 是外部进程，无法获取实时进度）
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
-        ProgressStyle::with_template("{spinner} AssetStudio 导出中... {elapsed}")
-            .unwrap()
+        ProgressStyle::with_template("{spinner} AssetStudio 导出中... {elapsed}").unwrap(),
     );
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let status = Command::new(asset_studio_path)
         .arg(&decrypted_dir)
         .args([
-            "-t", "tex2d",
-            "-g", "fileName",
-            "-f", "assetName",
-            "-o", &output_dir.to_string_lossy(),
+            "-t",
+            "tex2d",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName",
+            "-o",
+            &output_dir.to_string_lossy(),
             "-r",
-            "--unity-version", UNITY_VERSION,
-            "--log-level", "warning",
+            "--unity-version",
+            UNITY_VERSION,
+            "--log-level",
+            "warning",
         ])
         .status()
         .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
@@ -261,7 +347,7 @@ fn categorize(raw_dir: &Path, output_dir: &Path) -> anyhow::Result<CategorizeRes
     pb.set_style(
         ProgressStyle::with_template("{spinner} [{bar:30}] {pos}/{len} {msg}")
             .unwrap()
-            .progress_chars("=> ")
+            .progress_chars("=> "),
     );
 
     for entry in dirs {
@@ -277,7 +363,10 @@ fn categorize(raw_dir: &Path, output_dir: &Path) -> anyhow::Result<CategorizeRes
             Some('1') => &main_dir,
             Some('8') => &special_dir,
             Some('9') => &token_dir,
-            _ => { pb.inc(1); continue; }
+            _ => {
+                pb.inc(1);
+                continue;
+            }
         };
 
         // 检查是否已分类
@@ -343,7 +432,7 @@ fn resize_textures(input_dir: &Path, output_dir: &Path) -> anyhow::Result<Resize
     pb.set_style(
         ProgressStyle::with_template("{spinner} [{bar:30}] {pos}/{len} 缩放 {msg}")
             .unwrap()
-            .progress_chars("=> ")
+            .progress_chars("=> "),
     );
 
     for png_path in &pngs {
@@ -370,8 +459,7 @@ fn resize_textures(input_dir: &Path, output_dir: &Path) -> anyhow::Result<Resize
 
 /// 将单张 PNG 缩放至 848x1024（Lanczos3）。
 fn resize_single_848x1024(input: &Path, output: &Path) -> anyhow::Result<()> {
-    let img = image::open(input)
-        .with_context(|| format!("无法打开图片: {}", input.display()))?;
+    let img = image::open(input).with_context(|| format!("无法打开图片: {}", input.display()))?;
 
     if img.width() == 848 && img.height() == 1024 {
         std::fs::copy(input, output)?;
@@ -420,7 +508,7 @@ fn extract_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Resu
 
     // 加载哈希缓存文件（id → sha256）
     let hash_cache_path = output_dir.join(".hashes.json");
-    let mut hash_cache: BTreeMap<String, String> = if hash_cache_path.exists() {
+    let hash_cache: BTreeMap<String, String> = if hash_cache_path.exists() {
         let raw = std::fs::read_to_string(&hash_cache_path)?;
         serde_json::from_str(&raw).unwrap_or_default()
     } else {
@@ -538,8 +626,7 @@ fn extract_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Resu
     // 运行 AssetStudio
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
-        ProgressStyle::with_template("{spinner} AssetStudio 导出中... {elapsed}")
-            .unwrap(),
+        ProgressStyle::with_template("{spinner} AssetStudio 导出中... {elapsed}").unwrap(),
     );
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
@@ -560,9 +647,7 @@ fn extract_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Resu
             "warning",
         ])
         .status()
-        .with_context(|| {
-            format!("无法启动 AssetStudio: {}", asset_studio_path.display())
-        })?;
+        .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
 
     spinner.finish_and_clear();
 
@@ -603,12 +688,564 @@ fn extract_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Resu
     let json = serde_json::to_string_pretty(&current_hashes)?;
     std::fs::write(&hash_cache_path, json)?;
 
-    println!(
-        "pack-icons 图标提取完成: 更新 {} 个",
-        stale_ids.len()
-    );
+    println!("pack-icons 图标提取完成: 更新 {} 个", stale_ids.len());
 
     Ok(())
+}
+
+// ============================================================================
+// card-frames 提取
+// ============================================================================
+
+/// 从 UI/Card2D 中提取 frame2d_*.ab 为 PNG。
+fn extract_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
+    let source_dir = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("decrypted")
+        .join(CARD_FRAME_SOURCE_DIR);
+
+    if !source_dir.exists() {
+        anyhow::bail!(
+            "边框源目录不存在: {}（请先运行 wbu asset batch -v Chs）",
+            source_dir.display()
+        );
+    }
+
+    let output_dir = data_dir.join("exports").join("card-frames");
+    std::fs::create_dir_all(&output_dir)?;
+
+    let bundles: Vec<_> = std::fs::read_dir(&source_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("frame2d_") && name.ends_with(".ab")
+        })
+        .collect();
+
+    if bundles.is_empty() {
+        println!("UI/Card2D 中未找到 frame2d_*.ab，跳过");
+        return Ok(());
+    }
+
+    let stale: Vec<_> = bundles
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let id = name.strip_suffix(".ab").unwrap_or(&name);
+            let out = output_dir.join(format!("{id}.png"));
+            (!out.exists()).then(|| entry.path())
+        })
+        .collect();
+
+    if stale.is_empty() {
+        println!("card-frames 全部已存在（{} 个），跳过", bundles.len());
+        return Ok(());
+    }
+
+    let temp_input = output_dir.join(".temp_input");
+    let temp_output = output_dir.join(".temp_output");
+    if temp_input.exists() {
+        std::fs::remove_dir_all(&temp_input)?;
+    }
+    if temp_output.exists() {
+        std::fs::remove_dir_all(&temp_output)?;
+    }
+    std::fs::create_dir_all(&temp_input)?;
+    std::fs::create_dir_all(&temp_output)?;
+
+    for src in &stale {
+        let dst = temp_input.join(src.file_name().unwrap());
+        std::fs::copy(src, dst)?;
+    }
+
+    run_asset_studio_on_dir(&temp_input, &temp_output, asset_studio_path, false)?;
+
+    let mut exported = 0usize;
+    for src in &stale {
+        let file_name = src.file_name().unwrap().to_string_lossy().to_string();
+        let id = file_name.strip_suffix(".ab").unwrap_or(&file_name);
+        let export_dir = temp_output.join(format!("{}_export", file_name));
+        if let Ok(pngs) = find_pngs(&export_dir) {
+            if let Some(png_path) = pngs.first() {
+                std::fs::rename(png_path, output_dir.join(format!("{id}.png")))?;
+                exported += 1;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_input);
+    let _ = std::fs::remove_dir_all(&temp_output);
+
+    println!("card-frames 提取完成: {} 个", exported);
+    Ok(())
+}
+
+fn run_asset_studio_on_dir(
+    input_dir: &Path,
+    output_dir: &Path,
+    asset_studio_path: &Path,
+    recursive: bool,
+) -> anyhow::Result<()> {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} AssetStudio 导出中... {elapsed}").unwrap(),
+    );
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let mut cmd = Command::new(asset_studio_path);
+    cmd.arg(input_dir).args([
+        "-t",
+        "tex2d",
+        "-g",
+        "fileName",
+        "-f",
+        "assetName",
+        "-o",
+        &output_dir.to_string_lossy(),
+        "--unity-version",
+        UNITY_VERSION,
+        "--log-level",
+        "warning",
+    ]);
+    if recursive {
+        cmd.arg("-r");
+    }
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
+
+    spinner.finish_and_clear();
+
+    if !status.success() {
+        anyhow::bail!("AssetStudio 退出码: {:?}", status.code());
+    }
+    Ok(())
+}
+
+// ============================================================================
+// card render
+// ============================================================================
+
+#[derive(Debug, Default)]
+pub struct RenderStats {
+    pub rendered: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CardRenderEntry {
+    card_id: i64,
+    card_style_id: i64,
+    cost: Option<i64>,
+    rarity: Option<i64>,
+    type_flags: Option<i64>,
+    is_evolution: bool,
+    name_chs: String,
+}
+
+#[derive(Debug, Default)]
+struct BaseStats {
+    attack: Option<i64>,
+    defense: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RenderConfig {
+    canvas: CanvasConfig,
+    art: ArtConfig,
+    frame: RectConfig,
+    name: TextConfig,
+    cost: TextConfig,
+    attack: TextConfig,
+    defense: TextConfig,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CanvasConfig {
+    width: u32,
+    height: u32,
+    background: [u8; 4],
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ArtConfig {
+    x: i64,
+    y: i64,
+    width: u32,
+    height: u32,
+    crop_x: u32,
+    crop_y: u32,
+    crop_width: u32,
+    crop_height: u32,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RectConfig {
+    x: i64,
+    y: i64,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TextConfig {
+    center_x: i32,
+    center_y: i32,
+    font_size: f32,
+    max_width: Option<u32>,
+}
+
+fn load_cards(data_dir: &Path) -> anyhow::Result<Vec<CardRenderEntry>> {
+    let path = data_dir
+        .join("exports")
+        .join("analysis")
+        .join("cards_full.json");
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("无法读取: {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("JSON 解析失败: {}", path.display()))
+}
+
+fn load_base_stats(data_dir: &Path) -> anyhow::Result<HashMap<i64, BaseStats>> {
+    let path = data_dir
+        .join("exports")
+        .join("master-data")
+        .join("Chs")
+        .join("BaseCardMaster.json");
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("无法读取: {}", path.display()))?;
+    let rows: Vec<Vec<serde_json::Value>> =
+        serde_json::from_str(&raw).with_context(|| format!("JSON 解析失败: {}", path.display()))?;
+
+    let mut result = HashMap::with_capacity(rows.len());
+    for row in rows {
+        if let Some(card_id) = row.first().and_then(|v| v.as_i64()) {
+            result.insert(
+                card_id,
+                BaseStats {
+                    attack: row.get(5).and_then(|v| v.as_i64()),
+                    defense: row.get(6).and_then(|v| v.as_i64()),
+                },
+            );
+        }
+    }
+    Ok(result)
+}
+
+fn load_render_config() -> anyhow::Result<RenderConfig> {
+    let path = workspace_config_path("render.toml");
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("无法读取: {}", path.display()))?;
+    toml::from_str(&raw).with_context(|| format!("TOML 解析失败: {}", path.display()))
+}
+
+fn render_one_card(
+    data_dir: &Path,
+    card: &CardRenderEntry,
+    base_stats: &HashMap<i64, BaseStats>,
+    variant: &str,
+    name_font_path: Option<&Path>,
+    number_font_path: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    if card.is_evolution {
+        anyhow::bail!("暂不渲染进化派生卡");
+    }
+
+    let kind = card_kind(card.type_flags)?;
+    let rarity = rarity_name(card.rarity)?;
+    let art_path = card_texture_path(data_dir, card.card_style_id);
+    let frame_path = data_dir
+        .join("exports")
+        .join("card-frames")
+        .join(format!("frame2d_{kind}_{rarity}.png"));
+
+    if !art_path.exists() {
+        anyhow::bail!("卡图不存在: {}", art_path.display());
+    }
+    if !frame_path.exists() {
+        anyhow::bail!(
+            "边框不存在: {}（请先运行 wbu texture card-frames）",
+            frame_path.display()
+        );
+    }
+
+    let config = load_render_config()?;
+    let mut canvas = RgbaImage::from_pixel(
+        config.canvas.width,
+        config.canvas.height,
+        Rgba(config.canvas.background),
+    );
+
+    let art = image::open(&art_path)
+        .with_context(|| format!("无法打开卡图: {}", art_path.display()))?
+        .to_rgba8();
+    let art_crop = crop_configured_art(&art, &config.art)?;
+    let art_resized = DynamicImage::ImageRgba8(art_crop)
+        .resize_exact(
+            config.art.width,
+            config.art.height,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8();
+    image::imageops::overlay(&mut canvas, &art_resized, config.art.x, config.art.y);
+
+    let frame = image::open(&frame_path)
+        .with_context(|| format!("无法打开边框: {}", frame_path.display()))?
+        .resize_exact(
+            config.frame.width,
+            config.frame.height,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8();
+    image::imageops::overlay(&mut canvas, &frame, config.frame.x, config.frame.y);
+
+    let name_font = load_name_font(name_font_path)?;
+    let number_font = load_number_font(number_font_path)?;
+    draw_label_text(
+        &mut canvas,
+        &name_font,
+        &card.name_chs,
+        config.name.center_x,
+        config.name.center_y,
+        config.name.font_size,
+        config.name.max_width.unwrap_or(i32::MAX as u32) as i32,
+    );
+    if let Some(cost) = card.cost {
+        draw_centered_text(
+            &mut canvas,
+            &number_font,
+            &cost.to_string(),
+            config.cost.center_x,
+            config.cost.center_y,
+            config.cost.font_size,
+            Rgba([255, 255, 255, 255]),
+        );
+    }
+    if kind == "follower" {
+        let stats = base_stats.get(&card.card_id);
+        if let Some(attack) = stats.and_then(|s| s.attack) {
+            draw_centered_text(
+                &mut canvas,
+                &number_font,
+                &attack.to_string(),
+                config.attack.center_x,
+                config.attack.center_y,
+                config.attack.font_size,
+                Rgba([255, 255, 255, 255]),
+            );
+        }
+        if let Some(defense) = stats.and_then(|s| s.defense) {
+            draw_centered_text(
+                &mut canvas,
+                &number_font,
+                &defense.to_string(),
+                config.defense.center_x,
+                config.defense.center_y,
+                config.defense.font_size,
+                Rgba([255, 255, 255, 255]),
+            );
+        }
+    }
+
+    let output_dir = data_dir
+        .join("exports")
+        .join("card-renders")
+        .join(variant)
+        .join(card_texture_category(card.card_style_id));
+    std::fs::create_dir_all(&output_dir)?;
+    let out = output_dir.join(format!("{}.png", card.card_id));
+    DynamicImage::ImageRgba8(canvas).save(&out)?;
+    Ok(out)
+}
+
+fn crop_configured_art(image: &RgbaImage, config: &ArtConfig) -> anyhow::Result<RgbaImage> {
+    let x = config.crop_x.min(image.width().saturating_sub(1));
+    let y = config.crop_y.min(image.height().saturating_sub(1));
+    let width = config.crop_width.min(image.width().saturating_sub(x));
+    let height = config.crop_height.min(image.height().saturating_sub(y));
+    if width == 0 || height == 0 {
+        anyhow::bail!("render.toml 的 art crop 区域为空");
+    }
+    Ok(image::imageops::crop_imm(image, x, y, width, height).to_image())
+}
+
+fn card_kind(type_flags: Option<i64>) -> anyhow::Result<&'static str> {
+    let flags = type_flags.unwrap_or(0);
+    if flags & 1 != 0 {
+        Ok("follower")
+    } else if flags & 2 != 0 {
+        Ok("spell")
+    } else if flags & 4 != 0 {
+        Ok("amulet")
+    } else {
+        anyhow::bail!("不支持的 type_flags={flags}")
+    }
+}
+
+fn rarity_name(rarity: Option<i64>) -> anyhow::Result<&'static str> {
+    match rarity.unwrap_or(0) {
+        1 => Ok("bronze"),
+        2 => Ok("silver"),
+        3 => Ok("gold"),
+        4 => Ok("legend"),
+        r => anyhow::bail!("不支持的 rarity={r}"),
+    }
+}
+
+fn card_texture_path(data_dir: &Path, card_style_id: i64) -> PathBuf {
+    data_dir
+        .join("exports")
+        .join("card-textures-resized")
+        .join(card_texture_category(card_style_id))
+        .join(format!("{card_style_id}.png"))
+}
+
+fn card_texture_category(card_style_id: i64) -> &'static str {
+    match card_style_id.to_string().chars().next() {
+        Some('8') => "Special",
+        Some('9') => "Token",
+        _ => "Main",
+    }
+}
+
+fn load_name_font(font_path: Option<&Path>) -> anyhow::Result<FontArc> {
+    if let Some(path) = font_path {
+        return load_font_file(path)
+            .with_context(|| format!("无法加载卡名字体: {}", path.display()));
+    }
+    load_first_font(&[
+        None,
+        Some(workspace_font_path("dfweibeiw7-gb.ttc")),
+        Some(PathBuf::from(r"C:\Windows\Fonts\NotoSansSC-VF.ttf")),
+        Some(PathBuf::from(r"C:\Windows\Fonts\simhei.ttf")),
+        Some(PathBuf::from(r"C:\Windows\Fonts\msyhbd.ttc")),
+    ])
+    .context("无法加载卡名字体，请用 --font 指定 ttf/otf 字体")
+}
+
+fn load_number_font(font_path: Option<&Path>) -> anyhow::Result<FontArc> {
+    if let Some(path) = font_path {
+        return load_font_file(path)
+            .with_context(|| format!("无法加载数字字体: {}", path.display()));
+    }
+    load_first_font(&[
+        None,
+        Some(workspace_font_path("Junicode-Bold.ttf")),
+        Some(PathBuf::from(r"C:\Windows\Fonts\seguisb.ttf")),
+        Some(PathBuf::from(r"C:\Windows\Fonts\arial.ttf")),
+    ])
+    .context("无法加载数字字体，请用 --number-font 指定 ttf/otf 字体")
+}
+
+fn workspace_font_path(file_name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("assets")
+        .join("fonts")
+        .join(file_name)
+}
+
+fn workspace_config_path(file_name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("config")
+        .join(file_name)
+}
+
+fn load_first_font(candidates: &[Option<PathBuf>]) -> anyhow::Result<FontArc> {
+    for path in candidates.iter().flatten() {
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(font) = load_font_file(path) {
+            return Ok(font);
+        }
+    }
+    anyhow::bail!("没有可用字体候选")
+}
+
+fn load_font_file(path: &Path) -> anyhow::Result<FontArc> {
+    let bytes = std::fs::read(path)?;
+    FontArc::try_from_vec(bytes)
+        .map_err(|_| anyhow::anyhow!("字体格式不受支持或文件损坏: {}", path.display()))
+}
+
+fn draw_label_text(
+    image: &mut RgbaImage,
+    font: &FontArc,
+    text: &str,
+    center_x: i32,
+    baseline_y: i32,
+    mut size: f32,
+    max_width: i32,
+) {
+    let clean = strip_ruby_tags(text);
+    while size > 24.0 {
+        let (w, _) = text_size(PxScale::from(size), font, &clean);
+        if w <= max_width as u32 {
+            break;
+        }
+        size -= 2.0;
+    }
+    draw_centered_text(
+        image,
+        font,
+        &clean,
+        center_x,
+        baseline_y,
+        size,
+        Rgba([255, 255, 255, 255]),
+    );
+}
+
+fn draw_centered_text(
+    image: &mut RgbaImage,
+    font: &FontArc,
+    text: &str,
+    center_x: i32,
+    center_y: i32,
+    size: f32,
+    color: Rgba<u8>,
+) {
+    let scale = PxScale::from(size);
+    let (w, h) = text_size(scale, font, text);
+    let x = center_x - (w as i32 / 2);
+    let y = center_y - (h as i32 / 2);
+    draw_text_with_shadow(image, font, text, x, y, size, color);
+}
+
+fn draw_text_with_shadow(
+    image: &mut RgbaImage,
+    font: &FontArc,
+    text: &str,
+    x: i32,
+    y: i32,
+    size: f32,
+    color: Rgba<u8>,
+) {
+    let scale = PxScale::from(size);
+    let shadow = Rgba([0, 0, 0, 210]);
+    for (dx, dy) in [(-2, 0), (2, 0), (0, -2), (0, 2), (2, 2)] {
+        draw_text_mut(image, shadow, x + dx, y + dy, scale, font, text);
+    }
+    draw_text_mut(image, color, x, y, scale, font, text);
+}
+
+fn strip_ruby_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
 }
 
 // ============================================================================

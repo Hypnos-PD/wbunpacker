@@ -66,6 +66,12 @@ enum Command {
         sub: TextureCmd,
     },
 
+    /// 渲染完整卡牌图（MVP: 卡图 + Card2D 边框 + 名称/cost/攻血）
+    Render {
+        #[command(subcommand)]
+        sub: RenderCmd,
+    },
+
     /// 解密客户端 meta.db (骨架)
     Metadb {
         path: String,
@@ -117,6 +123,43 @@ enum TextureCmd {
         /// AssetStudio CLI 路径（覆盖配置文件）
         #[arg(long)]
         asset_studio: Option<String>,
+    },
+    /// 提取 Card2D 卡牌边框: UI/Card2D/frame2d_*.ab -> PNG
+    CardFrames {
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RenderCmd {
+    /// 渲染单张卡牌
+    Card {
+        /// card_id（不是 card_style_id）
+        #[arg(long)]
+        id: i64,
+        /// 输出语言目录名
+        #[arg(short, long, default_value = "Chs")]
+        variant: String,
+        /// 卡名字体路径（默认使用 assets/fonts/dfweibeiw7-gb.ttc）
+        #[arg(long)]
+        font: Option<String>,
+        /// 数字字体路径（默认使用 assets/fonts/Junicode-Bold.ttf）
+        #[arg(long)]
+        number_font: Option<String>,
+    },
+    /// 批量渲染 cards_full.json 中当前支持的卡牌
+    Cards {
+        /// 输出语言目录名
+        #[arg(short, long, default_value = "Chs")]
+        variant: String,
+        /// 卡名字体路径（默认使用 assets/fonts/dfweibeiw7-gb.ttc）
+        #[arg(long)]
+        font: Option<String>,
+        /// 数字字体路径（默认使用 assets/fonts/Junicode-Bold.ttf）
+        #[arg(long)]
+        number_font: Option<String>,
     },
 }
 
@@ -267,16 +310,6 @@ async fn main() -> anyhow::Result<()> {
                     std::fs::write(&output_path, json)?;
                     println!("完成: {} 个卡包 => {}", packs.len(), output_path.display());
                 }
-                Some(MasterCmd::Packs) => {
-                    let master_data_dir = data_dir.join("exports").join("master-data");
-                    let output_path = data_dir.join("exports").join("analysis").join("pack_names.json");
-                    println!("生成 pack_names.json...");
-                    let packs = master_data::generate_pack_names(&master_data_dir)?;
-                    let json = serde_json::to_string_pretty(&packs)?;
-                    std::fs::create_dir_all(output_path.parent().unwrap())?;
-                    std::fs::write(&output_path, json)?;
-                    println!("完成: {} 个卡包 => {}", packs.len(), output_path.display());
-                }
                 Some(MasterCmd::Cards) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
                     let output_path = data_dir.join("exports").join("analysis").join("cards_full.json");
@@ -405,6 +438,33 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_pack_icons(data_dir, &as_path)?;
+            }
+            TextureCmd::CardFrames { asset_studio } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                texture::process_card_frames(data_dir, &as_path)?;
+            }
+        },
+        Command::Render { sub } => match sub {
+            RenderCmd::Card { id, variant, font, number_font } => {
+                let cfg = config::load()?;
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                let font_path = font.as_deref().map(std::path::Path::new);
+                let number_font_path = number_font.as_deref().map(std::path::Path::new);
+                let out = texture::render_card_image(data_dir, id, &variant, font_path, number_font_path)?;
+                println!("渲染完成: {}", out.display());
+            }
+            RenderCmd::Cards { variant, font, number_font } => {
+                let cfg = config::load()?;
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                let font_path = font.as_deref().map(std::path::Path::new);
+                let number_font_path = number_font.as_deref().map(std::path::Path::new);
+                let stats = texture::render_all_card_images(data_dir, &variant, font_path, number_font_path)?;
+                println!("批量渲染完成: {} | 跳过: {}", stats.rendered, stats.skipped);
             }
         },
         Command::Metadb { .. } => todo!("metadb"),
