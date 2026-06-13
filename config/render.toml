@@ -1,12 +1,6 @@
-# Render coordinates are in final output pixels.
-# Defaults are derived from D:/Downloads/card/10001110.png with a uniform
-# height scale: 687 -> 1024 (1.4905386x). The unpacked illustration remains
-# 848x1024, but the complete card frame uses the official card aspect ratio.
-
 [canvas]
-width = 790
+width = 782
 height = 1024
-# Transparent background. Use [255, 255, 255, 255] if a white web-style background is preferred.
 background = [255, 255, 255, 0]
 
 [art]
@@ -29,6 +23,12 @@ y = 0
 width = 782
 height = 1024
 
+[class_icon]
+x = 366
+y = 878
+width = 50
+height = 50
+
 [name]
 center_x = 406
 center_y = 146
@@ -49,3 +49,136 @@ font_size = 150
 center_x = 682
 center_y = 882
 font_size = 150
+
+# Per-card-kind overrides. Values default to the global sections above when a
+# field is omitted. These are intentionally duplicated so each kind can be
+# tuned independently.
+
+# [follower.art]
+# x = 98
+# y = 194
+# width = 590
+# height = 711
+# crop_x = 0
+# crop_y = 0
+# crop_width = 848
+# crop_height = 1024
+
+# [follower.frame]
+# x = 0
+# y = 0
+# width = 782
+# height = 1024
+
+# [follower.class_icon]
+# x = 366
+# y = 878
+# width = 50
+# height = 50
+
+# [follower.name]
+# center_x = 406
+# center_y = 146
+# font_size = 60
+# max_width = 337
+
+# [follower.cost]
+# center_x = 96
+# center_y = 122
+# font_size = 150
+
+# [follower.attack]
+# center_x = 102
+# center_y = 890
+# font_size = 150
+
+# [follower.defense]
+# center_x = 682
+# center_y = 882
+# font_size = 150
+
+# [spell.art]
+# x = 98
+# y = 194
+# width = 590
+# height = 711
+# crop_x = 0
+# crop_y = 0
+# crop_width = 848
+# crop_height = 1024
+
+# [spell.frame]
+# x = 0
+# y = 0
+# width = 782
+# height = 1024
+
+# [spell.class_icon]
+# x = 366
+# y = 878
+# width = 50
+# height = 50
+
+# [spell.name]
+# center_x = 406
+# center_y = 146
+# font_size = 60
+# max_width = 337
+
+# [spell.cost]
+# center_x = 96
+# center_y = 122
+# font_size = 150
+
+# [spell.attack]
+# center_x = 102
+# center_y = 890
+# font_size = 150
+
+# [spell.defense]
+# center_x = 682
+# center_y = 882
+# font_size = 150
+
+# [amulet.art]
+# x = 98
+# y = 194
+# width = 590
+# height = 711
+# crop_x = 0
+# crop_y = 0
+# crop_width = 848
+# crop_height = 1024
+
+# [amulet.frame]
+# x = 0
+# y = 0
+# width = 782
+# height = 1024
+
+# [amulet.class_icon]
+# x = 366
+# y = 878
+# width = 50
+# height = 50
+
+# [amulet.name]
+# center_x = 406
+# center_y = 146
+# font_size = 60
+# max_width = 337
+
+# [amulet.cost]
+# center_x = 96
+# center_y = 122
+# font_size = 150
+
+# [amulet.attack]
+# center_x = 102
+# center_y = 890
+# font_size = 150
+
+# [amulet.defense]
+# center_x = 682
+# center_y = 882
+# font_size = 150

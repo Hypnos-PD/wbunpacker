@@ -53,6 +53,9 @@ const CARD_TEXTURES_PREFIX: &str = "Assets/_Wizard2Resources/Card/Textures/";
 /// Card2D 边框资源目录。
 const CARD_FRAME_SOURCE_DIR: &str = "UI/Card2D";
 
+/// 卡牌职业图标资源目录。
+const CARD_CLASS_ICON_SOURCE_FILE: &str = "Atlas/Card2D.ab";
+
 /// 需要跳过的子路径
 const SKIP_PATTERNS: &[&str] = &["HighFoil"];
 
@@ -740,7 +743,7 @@ fn extract_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Res
 
     if stale.is_empty() {
         println!("card-frames 全部已存在（{} 个），跳过", bundles.len());
-        return Ok(());
+        return extract_card_class_icons(data_dir, asset_studio_path);
     }
 
     let temp_input = output_dir.join(".temp_input");
@@ -759,6 +762,7 @@ fn extract_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Res
         std::fs::copy(src, dst)?;
     }
 
+    
     run_asset_studio_on_dir(&temp_input, &temp_output, asset_studio_path, false)?;
 
     let mut exported = 0usize;
@@ -778,9 +782,106 @@ fn extract_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Res
     let _ = std::fs::remove_dir_all(&temp_output);
 
     println!("card-frames 提取完成: {} 个", exported);
+    extract_card_class_icons(data_dir, asset_studio_path)?;
     Ok(())
 }
+/// 从 Atlas/Card2D.ab (Sprite 图集) 中提取职业图标 PNG（含普通和 _high_premium 两版本）。
+fn extract_card_class_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
+    let source_file = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("decrypted")
+        .join(CARD_CLASS_ICON_SOURCE_FILE);
 
+    if !source_file.exists() {
+        anyhow::bail!(
+            "职业图标源文件不存在: {}（请先运行 wbu asset batch -v Chs）",
+            source_file.display()
+        );
+    }
+
+    let output_dir = data_dir.join("exports").join("card-class-icons");
+    std::fs::create_dir_all(&output_dir)?;
+
+    // 检查是否已有全部 8 个图标（含两版本）
+    let all_exist = (0..=7).all(|idx| {
+        output_dir.join(format!("card2d_class_icon_{idx}.png")).exists()
+            && output_dir
+                .join(format!("card2d_class_icon_{idx}_high_premium.png"))
+                .exists()
+    });
+
+    if all_exist {
+        println!("card-class-icons 全部已存在（8×2 个），跳过");
+        return Ok(());
+    }
+
+    let temp_input = output_dir.join(".temp_input");
+    let temp_output = output_dir.join(".temp_output");
+    if temp_input.exists() {
+        std::fs::remove_dir_all(&temp_input)?;
+    }
+    if temp_output.exists() {
+        std::fs::remove_dir_all(&temp_output)?;
+    }
+    std::fs::create_dir_all(&temp_input)?;
+    std::fs::create_dir_all(&temp_output)?;
+
+    std::fs::copy(&source_file, temp_input.join("Card2D.ab"))?;
+
+// 导出 Sprite（图集中的各个精灵），而不是 Texture2D
+    {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::with_template("{spinner} AssetStudio 导出 Sprite 中... {elapsed}").unwrap(),
+        );
+        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        let status = Command::new(asset_studio_path)
+            .arg(&temp_input)
+            .args([
+                "-t",
+                "sprite",
+                "-o",
+                &temp_output.to_string_lossy(),
+                "--unity-version",
+                UNITY_VERSION,
+                "--log-level",
+                "warning",
+            ])
+            .status()
+            .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
+
+        spinner.finish_and_clear();
+
+        if !status.success() {
+            anyhow::bail!("AssetStudio 退出码: {:?}", status.code());
+        }
+    }
+
+    let mut exported = 0usize;
+    for class_idx in 0..=7 {
+        // 两个版本分别提取
+        let variants = [
+            ("", "card2d_class_icon"),
+            ("_high_premium", "card2d_class_icon"),
+        ];
+        for (suffix, prefix) in &variants {
+            let src_name = format!("{prefix}_{class_idx}{suffix}.png");
+            let dst_name = format!("card2d_class_icon_{class_idx}{suffix}.png");
+            let src = temp_output.join("Atlas").join(&src_name);
+            if src.exists() {
+                std::fs::rename(&src, output_dir.join(&dst_name))?;
+                exported += 1;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_input);
+    let _ = std::fs::remove_dir_all(&temp_output);
+    println!("card-class-icons 提取完成: {} 个", exported);
+    Ok(())
+}
 fn run_asset_studio_on_dir(
     input_dir: &Path,
     output_dir: &Path,
@@ -838,6 +939,7 @@ pub struct RenderStats {
 struct CardRenderEntry {
     card_id: i64,
     card_style_id: i64,
+    class: i64,
     cost: Option<i64>,
     rarity: Option<i64>,
     type_flags: Option<i64>,
@@ -856,10 +958,17 @@ struct RenderConfig {
     canvas: CanvasConfig,
     art: ArtConfig,
     frame: RectConfig,
+    class_icon: Option<RectConfig>,
     name: TextConfig,
     cost: TextConfig,
     attack: TextConfig,
     defense: TextConfig,
+    #[serde(default)]
+    follower: KindRenderConfig,
+    #[serde(default)]
+    spell: KindRenderConfig,
+    #[serde(default)]
+    amulet: KindRenderConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -895,6 +1004,28 @@ struct TextConfig {
     center_y: i32,
     font_size: f32,
     max_width: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct KindRenderConfig {
+    art: Option<ArtConfig>,
+    frame: Option<RectConfig>,
+    class_icon: Option<RectConfig>,
+    name: Option<TextConfig>,
+    cost: Option<TextConfig>,
+    attack: Option<TextConfig>,
+    defense: Option<TextConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRenderConfig {
+    art: ArtConfig,
+    frame: RectConfig,
+    class_icon: Option<RectConfig>,
+    name: TextConfig,
+    cost: TextConfig,
+    attack: TextConfig,
+    defense: TextConfig,
 }
 
 fn load_cards(data_dir: &Path) -> anyhow::Result<Vec<CardRenderEntry>> {
@@ -940,6 +1071,46 @@ fn load_render_config() -> anyhow::Result<RenderConfig> {
     toml::from_str(&raw).with_context(|| format!("TOML 解析失败: {}", path.display()))
 }
 
+fn resolve_render_config(config: &RenderConfig, kind: &str) -> ResolvedRenderConfig {
+    let override_config = match kind {
+        "follower" => &config.follower,
+        "spell" => &config.spell,
+        "amulet" => &config.amulet,
+        _ => &config.follower,
+    };
+
+    ResolvedRenderConfig {
+        art: override_config
+            .art
+            .clone()
+            .unwrap_or_else(|| config.art.clone()),
+        frame: override_config
+            .frame
+            .clone()
+            .unwrap_or_else(|| config.frame.clone()),
+        class_icon: override_config
+            .class_icon
+            .clone()
+            .or_else(|| config.class_icon.clone()),
+        name: override_config
+            .name
+            .clone()
+            .unwrap_or_else(|| config.name.clone()),
+        cost: override_config
+            .cost
+            .clone()
+            .unwrap_or_else(|| config.cost.clone()),
+        attack: override_config
+            .attack
+            .clone()
+            .unwrap_or_else(|| config.attack.clone()),
+        defense: override_config
+            .defense
+            .clone()
+            .unwrap_or_else(|| config.defense.clone()),
+    }
+}
+
 fn render_one_card(
     data_dir: &Path,
     card: &CardRenderEntry,
@@ -952,13 +1123,14 @@ fn render_one_card(
         anyhow::bail!("暂不渲染进化派生卡");
     }
 
-    let kind = card_kind(card.type_flags)?;
+    let kind = card_kind(card.card_id)?;
     let rarity = rarity_name(card.rarity)?;
     let art_path = card_texture_path(data_dir, card.card_style_id);
     let frame_path = data_dir
         .join("exports")
         .join("card-frames")
         .join(format!("frame2d_{kind}_{rarity}.png"));
+    let class_icon_path = class_icon_path(data_dir, card.card_id)?;
 
     if !art_path.exists() {
         anyhow::bail!("卡图不存在: {}", art_path.display());
@@ -971,6 +1143,7 @@ fn render_one_card(
     }
 
     let config = load_render_config()?;
+    let layout = resolve_render_config(&config, kind);
     let mut canvas = RgbaImage::from_pixel(
         config.canvas.width,
         config.canvas.height,
@@ -980,25 +1153,48 @@ fn render_one_card(
     let art = image::open(&art_path)
         .with_context(|| format!("无法打开卡图: {}", art_path.display()))?
         .to_rgba8();
-    let art_crop = crop_configured_art(&art, &config.art)?;
+    let art_crop = crop_configured_art(&art, &layout.art)?;
     let art_resized = DynamicImage::ImageRgba8(art_crop)
         .resize_exact(
-            config.art.width,
-            config.art.height,
+            layout.art.width,
+            layout.art.height,
             image::imageops::FilterType::Lanczos3,
         )
         .to_rgba8();
-    image::imageops::overlay(&mut canvas, &art_resized, config.art.x, config.art.y);
+    image::imageops::overlay(&mut canvas, &art_resized, layout.art.x, layout.art.y);
 
     let frame = image::open(&frame_path)
         .with_context(|| format!("无法打开边框: {}", frame_path.display()))?
         .resize_exact(
-            config.frame.width,
-            config.frame.height,
+            layout.frame.width,
+            layout.frame.height,
             image::imageops::FilterType::Lanczos3,
         )
         .to_rgba8();
-    image::imageops::overlay(&mut canvas, &frame, config.frame.x, config.frame.y);
+    image::imageops::overlay(&mut canvas, &frame, layout.frame.x, layout.frame.y);
+
+    if let Some(class_icon_config) = &layout.class_icon {
+        if !class_icon_path.exists() {
+            anyhow::bail!(
+                "职业图标不存在: {}（请先运行 wbu texture card-frames）",
+                class_icon_path.display()
+            );
+        }
+        let class_icon = image::open(&class_icon_path)
+            .with_context(|| format!("无法打开职业图标: {}", class_icon_path.display()))?
+            .resize_exact(
+                class_icon_config.width,
+                class_icon_config.height,
+                image::imageops::FilterType::Lanczos3,
+            )
+            .to_rgba8();
+        image::imageops::overlay(
+            &mut canvas,
+            &class_icon,
+            class_icon_config.x,
+            class_icon_config.y,
+        );
+    }
 
     let name_font = load_name_font(name_font_path)?;
     let number_font = load_number_font(number_font_path)?;
@@ -1006,19 +1202,19 @@ fn render_one_card(
         &mut canvas,
         &name_font,
         &card.name_chs,
-        config.name.center_x,
-        config.name.center_y,
-        config.name.font_size,
-        config.name.max_width.unwrap_or(i32::MAX as u32) as i32,
+        layout.name.center_x,
+        layout.name.center_y,
+        layout.name.font_size,
+        layout.name.max_width.unwrap_or(i32::MAX as u32) as i32,
     );
     if let Some(cost) = card.cost {
         draw_centered_text(
             &mut canvas,
             &number_font,
             &cost.to_string(),
-            config.cost.center_x,
-            config.cost.center_y,
-            config.cost.font_size,
+            layout.cost.center_x,
+            layout.cost.center_y,
+            layout.cost.font_size,
             Rgba([255, 255, 255, 255]),
         );
     }
@@ -1029,9 +1225,9 @@ fn render_one_card(
                 &mut canvas,
                 &number_font,
                 &attack.to_string(),
-                config.attack.center_x,
-                config.attack.center_y,
-                config.attack.font_size,
+                layout.attack.center_x,
+                layout.attack.center_y,
+                layout.attack.font_size,
                 Rgba([255, 255, 255, 255]),
             );
         }
@@ -1040,9 +1236,9 @@ fn render_one_card(
                 &mut canvas,
                 &number_font,
                 &defense.to_string(),
-                config.defense.center_x,
-                config.defense.center_y,
-                config.defense.font_size,
+                layout.defense.center_x,
+                layout.defense.center_y,
+                layout.defense.font_size,
                 Rgba([255, 255, 255, 255]),
             );
         }
@@ -1070,17 +1266,31 @@ fn crop_configured_art(image: &RgbaImage, config: &ArtConfig) -> anyhow::Result<
     Ok(image::imageops::crop_imm(image, x, y, width, height).to_image())
 }
 
-fn card_kind(type_flags: Option<i64>) -> anyhow::Result<&'static str> {
-    let flags = type_flags.unwrap_or(0);
-    if flags & 1 != 0 {
-        Ok("follower")
-    } else if flags & 2 != 0 {
-        Ok("spell")
-    } else if flags & 4 != 0 {
-        Ok("amulet")
-    } else {
-        anyhow::bail!("不支持的 type_flags={flags}")
+/// 从 card_id 第 6 位（0-indexed 位置 5）推断卡牌种类。
+/// 参考 WBArts: 1 = follower, 2 = amulet, 3 = spell.
+fn card_kind(card_id: i64) -> anyhow::Result<&'static str> {
+    let s = card_id.to_string();
+    let digit = s.as_bytes().get(5).map(|b| b - b'0').unwrap_or(0);
+    match digit {
+        1 => Ok("follower"),
+        2 => Ok("amulet"),
+        3 => Ok("spell"),
+        d => anyhow::bail!("不支持的 card_id[5]={d} (card_id={card_id})"),
     }
+}
+
+/// 从 card_id 第 4 位（0-indexed 位置 3）取职业图标编号。
+/// 参考 WBArts: cls_digit = int(cid_str[3]).
+fn class_icon_path(data_dir: &Path, card_id: i64) -> anyhow::Result<PathBuf> {
+    let s = card_id.to_string();
+    let class_idx = s.as_bytes().get(3).map(|b| b - b'0').unwrap_or(0);
+    if class_idx > 7 {
+        anyhow::bail!("不支持的 card_id[3]={class_idx} (card_id={card_id})");
+    }
+    Ok(data_dir
+        .join("exports")
+        .join("card-class-icons")
+        .join(format!("card2d_class_icon_{class_idx}.png")))
 }
 
 fn rarity_name(rarity: Option<i64>) -> anyhow::Result<&'static str> {
@@ -1260,5 +1470,15 @@ mod tests {
     fn test_resource_id_routing() {
         assert!(CARD_TEXTURES_PREFIX.starts_with("Assets/_Wizard2Resources/Card/Textures/"));
         assert!(SKIP_PATTERNS.contains(&"HighFoil"));
+    }
+
+    #[test]
+    fn test_card_kind_mapping() {
+        // card_id[5] = 1 -> follower, 2 -> amulet, 3 -> spell
+        assert_eq!(card_kind(10001110).unwrap(), "follower");  // 不屈的剑斗士
+        assert_eq!(card_kind(10001210).unwrap(), "amulet");    // 侦探的放大镜
+        assert_eq!(card_kind(10012310).unwrap(), "spell");     // 昆虫的忠告
+        assert!(card_kind(65401010).is_err()); // cid[5]=0 = leader
+        assert!(card_kind(65044910).is_err()); // cid[5]=9 = token
     }
 }
