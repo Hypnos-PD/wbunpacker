@@ -7,8 +7,7 @@
 //! - 动态 slot 名（play_pair_10721110 而非坍缩的 play_pair）
 //! - 多 pair/cross/token/skill 变体
 //! - 增量：复用已有 WAV → 跳过 pck 解包
-//! - MD5 去重
-//!
+//! //!
 //! # 管线
 //!
 //! ```text
@@ -431,7 +430,6 @@ fn process_card_pck(
     // 提取并转码：每个 slot 对应一个 MP3 文件
     let mut result: BTreeMap<String, String> = BTreeMap::new();
     let mut skipped = 0usize;
-    let mut mp3_hashes: HashMap<String, String> = HashMap::new();
 
     for (slot, wem_ids) in &slot_to_wems {
         let mp3_path = card_out.join(format!("{}.mp3", slot));
@@ -439,13 +437,7 @@ fn process_card_pck(
         // 跳过已存在（增量）
         if mp3_path.exists() {
             skipped += 1;
-            let hash = md5_file(&mp3_path)?;
-            if let Some(canonical) = mp3_hashes.get(&hash) {
-                result.insert(slot.clone(), format!("{}/{}/{}.mp3", lang, prefix, canonical));
-            } else {
-                mp3_hashes.insert(hash, slot.clone());
-                result.insert(slot.clone(), format!("{}/{}/{}.mp3", lang, prefix, slot));
-            }
+            result.insert(slot.clone(), format!("{}/{}/{}.mp3", lang, prefix, slot));
             continue;
         }
 
@@ -483,13 +475,7 @@ fn process_card_pck(
         if let Some(wav_path) = source_wav {
             if wav_to_mp3(wav_path, &mp3_path, ffmpeg_path).is_ok() {
                 if let Some(ref tmp) = tmp_wav { let _ = std::fs::remove_file(tmp); }
-                let hash = md5_file(&mp3_path)?;
-                if let Some(canonical) = mp3_hashes.get(&hash) {
-                    result.insert(slot.clone(), format!("{}/{}/{}.mp3", lang, prefix, canonical));
-                } else {
-                    mp3_hashes.insert(hash, slot.clone());
-                    result.insert(slot.clone(), format!("{}/{}/{}.mp3", lang, prefix, slot));
-                }
+                result.insert(slot.clone(), format!("{}/{}/{}.mp3", lang, prefix, slot));
             }
         } else if need_tmp {
             let _ = std::fs::remove_file(card_out.join(format!("_tmp_{}.wav", wem_id)));
@@ -507,20 +493,6 @@ fn process_card_pck(
     }
 
     Ok((sorted, skipped))
-}
-
-/// 计算文件 MD5（去重比较用）。
-fn md5_file(path: &Path) -> anyhow::Result<String> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = md5::Context::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 { break; }
-        hasher.consume(&buf[..n]);
-    }
-    Ok(format!("{:x}", hasher.compute()))
 }
 
 // ============================================================================
