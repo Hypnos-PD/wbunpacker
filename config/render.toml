@@ -30,11 +30,10 @@ width = 50
 height = 50
 
 [name]
-center_x = 406
-center_y = 146
+center_x = 420
+center_y = 150
 font_size = 60
-max_width = 337
-
+max_width = 450
 [cost]
 center_x = 93
 center_y = 128
