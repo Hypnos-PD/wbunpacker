@@ -516,7 +516,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 } else if let Some(image_path) = res {
                     // --res 无 --id：纯自定义卡牌
-                    let kind = type_.as_deref().unwrap_or("follower");
+                    let kind = type_.as_deref().unwrap_or("spell");
                     let card_name = name.as_deref().unwrap_or("Unknown");
                     let out = texture::render_custom_card(
                         data_dir,

@@ -232,11 +232,12 @@ pub fn render_custom_card(
         );
     }
 
-    // 职业图标
-    let class_icon_path = if let Some(cls) = class {
-        if cls > 7 {
-            anyhow::bail!("--class 必须是 0-7，当前值为 {cls}");
-        }
+    // 职业图标：默认 class=0
+    let cls = class.unwrap_or(0);
+    if cls > 7 {
+        anyhow::bail!("--class 必须是 0-7，当前值为 {cls}");
+    }
+    let class_icon_path = {
         let p = data_dir
             .join("exports")
             .join("card-class-icons")
@@ -248,8 +249,6 @@ pub fn render_custom_card(
             );
         }
         Some(p)
-    } else {
-        None
     };
 
     let config = load_render_config()?;
@@ -260,10 +259,21 @@ pub fn render_custom_card(
         Rgba(config.canvas.background),
     );
 
-    // 卡图
-    let art = image::open(image_path)
+    // 卡图：先缩放到配置的源图尺寸（默认 848x1024），再裁剪+缩放
+    let art_src = image::open(image_path)
         .with_context(|| format!("无法打开卡图: {}", image_path.display()))?
         .to_rgba8();
+    let art = if art_src.width() != layout.art.crop_width || art_src.height() != layout.art.crop_height {
+        DynamicImage::ImageRgba8(art_src)
+            .resize_exact(
+                layout.art.crop_width,
+                layout.art.crop_height,
+                image::imageops::FilterType::Lanczos3,
+            )
+            .to_rgba8()
+    } else {
+        art_src
+    };
     let art_crop = crop_configured_art(&art, &layout.art)?;
     let art_resized = DynamicImage::ImageRgba8(art_crop)
         .resize_exact(
@@ -310,45 +320,40 @@ pub fn render_custom_card(
         layout.name.max_width.unwrap_or(i32::MAX as u32) as i32,
     );
 
-    // cost
-    if let Some(c) = cost {
-        let number_font = load_number_font(number_font_path)?;
+    // cost / attack / life：默认 0
+    let number_font = load_number_font(number_font_path)?;
+    let c = cost.unwrap_or(0);
+    draw_label_text(
+        &mut canvas,
+        &number_font,
+        &c.to_string(),
+        layout.cost.center_x,
+        layout.cost.center_y,
+        layout.cost.font_size,
+        layout.cost.max_width.unwrap_or(i32::MAX as u32) as i32,
+    );
+
+    if kind == "follower" {
+        let atk = attack.unwrap_or(0);
         draw_label_text(
             &mut canvas,
             &number_font,
-            &c.to_string(),
-            layout.cost.center_x,
-            layout.cost.center_y,
-            layout.cost.font_size,
-            layout.cost.max_width.unwrap_or(i32::MAX as u32) as i32,
+            &atk.to_string(),
+            layout.attack.center_x,
+            layout.attack.center_y,
+            layout.attack.font_size,
+            layout.attack.max_width.unwrap_or(i32::MAX as u32) as i32,
         );
-    }
-
-    // attack / life（仅 follower）
-    if kind == "follower" {
-        let number_font = load_number_font(number_font_path)?;
-        if let Some(atk) = attack {
-            draw_label_text(
-                &mut canvas,
-                &number_font,
-                &atk.to_string(),
-                layout.attack.center_x,
-                layout.attack.center_y,
-                layout.attack.font_size,
-                layout.attack.max_width.unwrap_or(i32::MAX as u32) as i32,
-            );
-        }
-        if let Some(lf) = life {
-            draw_label_text(
-                &mut canvas,
-                &number_font,
-                &lf.to_string(),
-                layout.defense.center_x,
-                layout.defense.center_y,
-                layout.defense.font_size,
-                layout.defense.max_width.unwrap_or(i32::MAX as u32) as i32,
-            );
-        }
+        let lf = life.unwrap_or(0);
+        draw_label_text(
+            &mut canvas,
+            &number_font,
+            &lf.to_string(),
+            layout.defense.center_x,
+            layout.defense.center_y,
+            layout.defense.font_size,
+            layout.defense.max_width.unwrap_or(i32::MAX as u32) as i32,
+        );
     }
 
     // 输出
