@@ -1,4 +1,4 @@
-//! 卡图纹理处理模块
+﻿//! 卡图纹理处理模块
 //!
 //! # 管线
 //!
@@ -1769,11 +1769,13 @@ fn draw_label_text(
         }
         size -= 2.0;
     }
+    let (w, _) = text_size(PxScale::from(size), font, &clean);
+    let adjusted_cx = center_x - ((max_width as f32 - w as f32) * 0.08) as i32;
     draw_centered_text(
         image,
         font,
         &clean,
-        center_x,
+        adjusted_cx,
         baseline_y,
         size,
         Rgba([255, 255, 255, 255]),
