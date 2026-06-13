@@ -197,6 +197,360 @@ pub fn render_all_card_images(
     Ok(stats)
 }
 
+/// 使用自定义资源渲染卡牌（不依赖 master data）。
+pub fn render_custom_card(
+    data_dir: &Path,
+    image_path: &Path,
+    card_name: &str,
+    kind: &str,
+    cost: Option<i64>,
+    attack: Option<i64>,
+    life: Option<i64>,
+    class: Option<i64>,
+    rarity: Option<&str>,
+    variant: &str,
+    name_font_path: Option<&Path>,
+    number_font_path: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    if !["follower", "spell", "amulet"].contains(&kind) {
+        anyhow::bail!("--type 必须是 follower / spell / amulet，当前值为 {kind}");
+    }
+    if !image_path.exists() {
+        anyhow::bail!("资源图片不存在: {}", image_path.display());
+    }
+
+    // 边框
+    let rarity_name = rarity.and_then(|r| rarity_name_from_str(r).ok()).unwrap_or("bronze");
+    let frame_path = data_dir
+        .join("exports")
+        .join("card-frames")
+        .join(format!("frame2d_{kind}_{rarity_name}.png"));
+    if !frame_path.exists() {
+        anyhow::bail!(
+            "边框不存在: {}（请先运行 wbu texture card-frames）",
+            frame_path.display()
+        );
+    }
+
+    // 职业图标
+    let class_icon_path = if let Some(cls) = class {
+        if cls > 7 {
+            anyhow::bail!("--class 必须是 0-7，当前值为 {cls}");
+        }
+        let p = data_dir
+            .join("exports")
+            .join("card-class-icons")
+            .join(format!("card2d_class_icon_{cls}.png"));
+        if !p.exists() {
+            anyhow::bail!(
+                "职业图标不存在: {}（请先运行 wbu texture card-frames）",
+                p.display()
+            );
+        }
+        Some(p)
+    } else {
+        None
+    };
+
+    let config = load_render_config()?;
+    let layout = resolve_render_config(&config, kind);
+    let mut canvas = RgbaImage::from_pixel(
+        config.canvas.width,
+        config.canvas.height,
+        Rgba(config.canvas.background),
+    );
+
+    // 卡图
+    let art = image::open(image_path)
+        .with_context(|| format!("无法打开卡图: {}", image_path.display()))?
+        .to_rgba8();
+    let art_crop = crop_configured_art(&art, &layout.art)?;
+    let art_resized = DynamicImage::ImageRgba8(art_crop)
+        .resize_exact(
+            layout.art.width,
+            layout.art.height,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8();
+    image::imageops::overlay(&mut canvas, &art_resized, layout.art.x, layout.art.y);
+
+    // 边框
+    let frame = image::open(&frame_path)
+        .with_context(|| format!("无法打开边框: {}", frame_path.display()))?
+        .resize_exact(
+            layout.frame.width,
+            layout.frame.height,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8();
+    image::imageops::overlay(&mut canvas, &frame, layout.frame.x, layout.frame.y);
+
+    // 职业图标
+    if let (Some(icon_config), Some(icon_path)) = (&layout.class_icon, &class_icon_path) {
+        let class_icon = image::open(icon_path)
+            .with_context(|| format!("无法打开职业图标: {}", icon_path.display()))?
+            .resize_exact(
+                icon_config.width,
+                icon_config.height,
+                image::imageops::FilterType::Lanczos3,
+            )
+            .to_rgba8();
+        image::imageops::overlay(&mut canvas, &class_icon, icon_config.x, icon_config.y);
+    }
+
+    // 卡名
+    let name_font = load_name_font(name_font_path)?;
+    draw_label_text(
+        &mut canvas,
+        &name_font,
+        card_name,
+        layout.name.center_x,
+        layout.name.center_y,
+        layout.name.font_size,
+        layout.name.max_width.unwrap_or(i32::MAX as u32) as i32,
+    );
+
+    // cost
+    if let Some(c) = cost {
+        let number_font = load_number_font(number_font_path)?;
+        draw_centered_text(
+            &mut canvas,
+            &number_font,
+            &c.to_string(),
+            layout.cost.center_x,
+            layout.cost.center_y,
+            layout.cost.font_size,
+            Rgba([255, 255, 255, 255]),
+        );
+    }
+
+    // attack / life（仅 follower）
+    if kind == "follower" {
+        let number_font = load_number_font(number_font_path)?;
+        if let Some(atk) = attack {
+            draw_label_text(
+                &mut canvas,
+                &number_font,
+                &atk.to_string(),
+                layout.attack.center_x,
+                layout.attack.center_y,
+                layout.attack.font_size,
+                layout.attack.max_width.unwrap_or(i32::MAX as u32) as i32,
+            );
+        }
+        if let Some(lf) = life {
+            draw_label_text(
+                &mut canvas,
+                &number_font,
+                &lf.to_string(),
+                layout.defense.center_x,
+                layout.defense.center_y,
+                layout.defense.font_size,
+                layout.defense.max_width.unwrap_or(i32::MAX as u32) as i32,
+            );
+        }
+    }
+
+    // 输出
+    let out_dir = data_dir
+        .join("exports")
+        .join("card-renders")
+        .join(variant)
+        .join("Custom");
+    std::fs::create_dir_all(&out_dir)?;
+    // 用文件名 stem 作为输出名
+    let stem = image_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "custom".to_string());
+    let out_path = out_dir.join(format!("{stem}.png"));
+    canvas.save(&out_path)?;
+    Ok(out_path)
+}
+
+/// 以 card_id 读取 master data 为底，用命令行参数覆盖任意字段后渲染。
+/// 只要传了 --res 就输出到 Custom/ 目录。
+pub fn render_card_with_overrides(
+    data_dir: &Path,
+    card_id: i64,
+    res: Option<&str>,
+    name: Option<&str>,
+    kind_override: Option<&str>,
+    cost_override: Option<i64>,
+    attack_override: Option<i64>,
+    life_override: Option<i64>,
+    class_override: Option<i64>,
+    rarity_override: Option<&str>,
+    variant: &str,
+    name_font_path: Option<&Path>,
+    number_font_path: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    let cards = load_cards(data_dir)?;
+    let base_stats = load_base_stats(data_dir)?;
+    let card = cards
+        .iter()
+        .find(|c| c.card_id == card_id)
+        .ok_or_else(|| anyhow::anyhow!("cards_full.json 中未找到 card_id={card_id}"))?;
+
+    if card.is_evolution {
+        anyhow::bail!("暂不渲染进化派生卡");
+    }
+
+    let kind = kind_override.unwrap_or_else(|| {
+        card_kind(card.card_id).unwrap_or("follower")
+    });
+    let rarity = if let Some(r) = rarity_override {
+        rarity_name_from_str(r)?
+    } else {
+        rarity_name(card.rarity)?
+    };
+    let art_path = if let Some(p) = res {
+        std::path::PathBuf::from(p)
+    } else {
+        card_texture_path(data_dir, card.card_style_id)
+    };
+    let frame_path = data_dir
+        .join("exports")
+        .join("card-frames")
+        .join(format!("frame2d_{kind}_{rarity}.png"));
+    let class_icon_path = if let Some(cls) = class_override {
+        if cls > 7 {
+            anyhow::bail!("--class 必须是 0-7，当前值为 {cls}");
+        }
+        let p = data_dir
+            .join("exports")
+            .join("card-class-icons")
+            .join(format!("card2d_class_icon_{cls}.png"));
+        if !p.exists() {
+            anyhow::bail!("职业图标不存在: {}", p.display());
+        }
+        Some(p)
+    } else {
+        let p = class_icon_path(data_dir, card.card_id)?;
+        p.exists().then_some(p)
+    };
+
+    if !art_path.exists() {
+        anyhow::bail!("卡图不存在: {}", art_path.display());
+    }
+    if !frame_path.exists() {
+        anyhow::bail!(
+            "边框不存在: {}（请先运行 wbu texture card-frames）",
+            frame_path.display()
+        );
+    }
+
+    let config = load_render_config()?;
+    let layout = resolve_render_config(&config, kind);
+    let mut canvas = RgbaImage::from_pixel(
+        config.canvas.width,
+        config.canvas.height,
+        Rgba(config.canvas.background),
+    );
+
+    let art = image::open(&art_path)
+        .with_context(|| format!("无法打开卡图: {}", art_path.display()))?
+        .to_rgba8();
+    let art_crop = crop_configured_art(&art, &layout.art)?;
+    let art_resized = DynamicImage::ImageRgba8(art_crop)
+        .resize_exact(
+            layout.art.width,
+            layout.art.height,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8();
+    image::imageops::overlay(&mut canvas, &art_resized, layout.art.x, layout.art.y);
+
+    let frame = image::open(&frame_path)
+        .with_context(|| format!("无法打开边框: {}", frame_path.display()))?
+        .resize_exact(
+            layout.frame.width,
+            layout.frame.height,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8();
+    image::imageops::overlay(&mut canvas, &frame, layout.frame.x, layout.frame.y);
+
+    if let (Some(icon_config), Some(icon_path)) = (&layout.class_icon, &class_icon_path) {
+        let class_icon = image::open(icon_path)
+            .with_context(|| format!("无法打开职业图标: {}", icon_path.display()))?
+            .resize_exact(
+                icon_config.width,
+                icon_config.height,
+                image::imageops::FilterType::Lanczos3,
+            )
+            .to_rgba8();
+        image::imageops::overlay(&mut canvas, &class_icon, icon_config.x, icon_config.y);
+    }
+
+    let name_font = load_name_font(name_font_path)?;
+    let display_name = name.unwrap_or(&card.name_chs);
+    draw_label_text(
+        &mut canvas,
+        &name_font,
+        display_name,
+        layout.name.center_x,
+        layout.name.center_y,
+        layout.name.font_size,
+        layout.name.max_width.unwrap_or(i32::MAX as u32) as i32,
+    );
+
+    let number_font = load_number_font(number_font_path)?;
+    let cost_val = cost_override.or(card.cost);
+    if let Some(c) = cost_val {
+        draw_label_text(
+            &mut canvas,
+            &number_font,
+            &c.to_string(),
+            layout.cost.center_x,
+            layout.cost.center_y,
+            layout.cost.font_size,
+            layout.cost.max_width.unwrap_or(i32::MAX as u32) as i32,
+        );
+    }
+
+    if kind == "follower" {
+        let stats = base_stats.get(&card.card_id);
+        let atk = attack_override.or_else(|| stats.and_then(|s| s.attack));
+        let def = life_override.or_else(|| stats.and_then(|s| s.defense));
+        if let Some(a) = atk {
+            draw_label_text(
+                &mut canvas,
+                &number_font,
+                &a.to_string(),
+                layout.attack.center_x,
+                layout.attack.center_y,
+                layout.attack.font_size,
+                layout.attack.max_width.unwrap_or(i32::MAX as u32) as i32,
+            );
+        }
+        if let Some(d) = def {
+            draw_label_text(
+                &mut canvas,
+                &number_font,
+                &d.to_string(),
+                layout.defense.center_x,
+                layout.defense.center_y,
+                layout.defense.font_size,
+                layout.defense.max_width.unwrap_or(i32::MAX as u32) as i32,
+            );
+        }
+    }
+
+    // 输出：有任意覆盖参数都走 Custom/，避免覆盖正常渲染结果
+    let out_dir = {
+        data_dir
+            .join("exports")
+            .join("card-renders")
+            .join(variant)
+            .join("Custom")
+    };
+    std::fs::create_dir_all(&out_dir)?;
+    let out_path = out_dir.join(format!("{card_id}.png"));
+    canvas.save(&out_path)?;
+    Ok(out_path)
+}
+
 // ============================================================================
 // 计数（增量跳过用）
 // ============================================================================
@@ -1208,38 +1562,38 @@ fn render_one_card(
         layout.name.max_width.unwrap_or(i32::MAX as u32) as i32,
     );
     if let Some(cost) = card.cost {
-        draw_centered_text(
+        draw_label_text(
             &mut canvas,
             &number_font,
             &cost.to_string(),
             layout.cost.center_x,
             layout.cost.center_y,
             layout.cost.font_size,
-            Rgba([255, 255, 255, 255]),
+            layout.cost.max_width.unwrap_or(i32::MAX as u32) as i32,
         );
     }
     if kind == "follower" {
         let stats = base_stats.get(&card.card_id);
         if let Some(attack) = stats.and_then(|s| s.attack) {
-            draw_centered_text(
+            draw_label_text(
                 &mut canvas,
                 &number_font,
                 &attack.to_string(),
                 layout.attack.center_x,
                 layout.attack.center_y,
                 layout.attack.font_size,
-                Rgba([255, 255, 255, 255]),
+                layout.attack.max_width.unwrap_or(i32::MAX as u32) as i32,
             );
         }
         if let Some(defense) = stats.and_then(|s| s.defense) {
-            draw_centered_text(
+            draw_label_text(
                 &mut canvas,
                 &number_font,
                 &defense.to_string(),
                 layout.defense.center_x,
                 layout.defense.center_y,
                 layout.defense.font_size,
-                Rgba([255, 255, 255, 255]),
+                layout.defense.max_width.unwrap_or(i32::MAX as u32) as i32,
             );
         }
     }
@@ -1291,6 +1645,16 @@ fn class_icon_path(data_dir: &Path, card_id: i64) -> anyhow::Result<PathBuf> {
         .join("exports")
         .join("card-class-icons")
         .join(format!("card2d_class_icon_{class_idx}.png")))
+}
+
+fn rarity_name_from_str(rarity: &str) -> anyhow::Result<&'static str> {
+    match rarity {
+        "bronze" => Ok("bronze"),
+        "silver" => Ok("silver"),
+        "gold" => Ok("gold"),
+        "legend" => Ok("legend"),
+        r => anyhow::bail!("不支持的 rarity={r}，可选: bronze / silver / gold / legend"),
+    }
 }
 
 fn rarity_name(rarity: Option<i64>) -> anyhow::Result<&'static str> {

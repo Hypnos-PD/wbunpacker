@@ -134,11 +134,38 @@ enum TextureCmd {
 
 #[derive(Subcommand)]
 enum RenderCmd {
-    /// 渲染单张卡牌
+    /// 渲染单张/全部/自定义卡牌
     Card {
-        /// card_id（不是 card_style_id）
+        /// card_id（不是 card_style_id）；可搭配 --name/--type/--cost 等覆盖参数
         #[arg(long)]
-        id: i64,
+        id: Option<i64>,
+        /// 渲染 cards_full.json 中所有卡牌
+        #[arg(long)]
+        all: bool,
+        /// 自定义卡图路径；搭配 --id 时覆盖默认卡图，单独使用则为纯自定义渲染
+        #[arg(long)]
+        res: Option<String>,
+        /// 覆盖卡名（可搭配 --id 或 --res）
+        #[arg(long)]
+        name: Option<String>,
+        /// 覆盖卡牌种类：follower / spell / amulet（可搭配 --id 或 --res）
+        #[arg(long, value_name = "KIND")]
+        type_: Option<String>,
+        /// 覆盖 cost（可搭配 --id 或 --res）
+        #[arg(long)]
+        cost: Option<i64>,
+        /// 覆盖攻击力（仅 follower，可搭配 --id 或 --res）
+        #[arg(long)]
+        attack: Option<i64>,
+        /// 覆盖体力（仅 follower，可搭配 --id 或 --res）
+        #[arg(long, value_name = "LIFE")]
+        life: Option<i64>,
+        /// 覆盖职业图标编号 0-7（可搭配 --id 或 --res）
+        #[arg(long)]
+        class: Option<i64>,
+        /// 覆盖稀有度：bronze / silver / gold / legend（可搭配 --id 或 --res）
+        #[arg(long, value_name = "RARITY")]
+        rarity: Option<String>,
         /// 输出语言目录名
         #[arg(short, long, default_value = "Chs")]
         variant: String,
@@ -450,13 +477,65 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Render { sub } => match sub {
-            RenderCmd::Card { id, variant, font, number_font } => {
+            RenderCmd::Card { id, all, res, name, type_, cost, attack, life, class, rarity, variant, font, number_font } => {
                 let cfg = config::load()?;
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 let font_path = font.as_deref().map(std::path::Path::new);
                 let number_font_path = number_font.as_deref().map(std::path::Path::new);
-                let out = texture::render_card_image(data_dir, id, &variant, font_path, number_font_path)?;
-                println!("渲染完成: {}", out.display());
+
+                let has_overrides = res.is_some() || name.is_some() || type_.is_some()
+                    || rarity.is_some()
+                    || cost.is_some() || attack.is_some() || life.is_some() || class.is_some();
+
+                if all {
+                    anyhow::ensure!(!has_overrides, "--all 不支持与 --res / --name / --type 等覆盖参数同时使用");
+                    let stats = texture::render_all_card_images(data_dir, &variant, font_path, number_font_path)?;
+                    println!("批量渲染完成: {} | 跳过: {}", stats.rendered, stats.skipped);
+                } else if let Some(card_id) = id {
+                    if has_overrides {
+                        // --id 带覆盖参数
+                        let out = texture::render_card_with_overrides(
+                            data_dir,
+                            card_id,
+                            res.as_deref(),
+                            name.as_deref(),
+                            type_.as_deref(),
+                            cost,
+                            attack,
+                            life,
+                            class,
+                            rarity.as_deref(),
+                            &variant,
+                            font_path,
+                            number_font_path,
+                        )?;
+                        println!("渲染完成: {}", out.display());
+                    } else {
+                        let out = texture::render_card_image(data_dir, card_id, &variant, font_path, number_font_path)?;
+                        println!("渲染完成: {}", out.display());
+                    }
+                } else if let Some(image_path) = res {
+                    // --res 无 --id：纯自定义卡牌
+                    let kind = type_.as_deref().unwrap_or("follower");
+                    let card_name = name.as_deref().unwrap_or("Unknown");
+                    let out = texture::render_custom_card(
+                        data_dir,
+                        std::path::Path::new(&image_path),
+                        card_name,
+                        kind,
+                        cost,
+                        attack,
+                        life,
+                        class,
+                        rarity.as_deref(),
+                        &variant,
+                        font_path,
+                        number_font_path,
+                    )?;
+                    println!("渲染完成: {}", out.display());
+                } else {
+                    anyhow::bail!("请指定 --id、--all 或 --res");
+                }
             }
             RenderCmd::Cards { variant, font, number_font } => {
                 let cfg = config::load()?;

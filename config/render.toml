@@ -36,19 +36,20 @@ font_size = 60
 max_width = 337
 
 [cost]
-center_x = 96
-center_y = 122
+center_x = 93
+center_y = 128
 font_size = 150
-
+max_width = 150
 [attack]
-center_x = 102
+center_x = 98
 center_y = 890
 font_size = 150
-
+max_width = 150
 [defense]
-center_x = 682
+center_x = 680
 center_y = 882
 font_size = 150
+max_width = 150
 
 # Per-card-kind overrides. Values default to the global sections above when a
 # field is omitted. These are intentionally duplicated so each kind can be
