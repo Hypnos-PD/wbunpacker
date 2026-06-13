@@ -313,14 +313,14 @@ pub fn render_custom_card(
     // cost
     if let Some(c) = cost {
         let number_font = load_number_font(number_font_path)?;
-        draw_centered_text(
+        draw_label_text(
             &mut canvas,
             &number_font,
             &c.to_string(),
             layout.cost.center_x,
             layout.cost.center_y,
             layout.cost.font_size,
-            Rgba([255, 255, 255, 255]),
+            layout.cost.max_width.unwrap_or(i32::MAX as u32) as i32,
         );
     }
 
