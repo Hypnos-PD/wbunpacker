@@ -17,7 +17,7 @@
 use anyhow::{anyhow, Context};
 use rmpv::Value;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // 数据结构
@@ -214,7 +214,7 @@ pub fn export_all(raw: &[u8], output_dir: &Path) -> anyhow::Result<Vec<ExportRes
 // ---------------------------------------------------------------------------
 
 /// cards_full.json 的单卡条目
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 
 struct CardFullEntry {
     card_id: i64,
@@ -236,7 +236,7 @@ struct CardFullEntry {
     text_keys: TextKeys,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SkillEntry {
     skill_id: i64,
     #[serde(rename = "type")]
@@ -244,7 +244,7 @@ struct SkillEntry {
     subtype: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct TextKeys {
     name: String,
     skill_desc: String,
@@ -439,6 +439,157 @@ pub fn generate_pack_names(
 
     Ok(pack_names)
 }
+// ---------------------------------------------------------------------------
+// emblems_full.json 生成
+// ---------------------------------------------------------------------------
+
+/// 从 EmblemMaster + 多语言 category 文本 + cards_full.json 生成 emblems_full.json。
+///
+/// 需要先运行 wbu master -v all 导出所有 5 语言的主数据表。
+///
+/// # 参数
+/// - master_data_dir: exports/master-data/ 目录（下面有 Chs/ Eng/ Jpn/ Kor/ Cht/ 子目录）
+/// - output_path: emblems_full.json 输出路径
+pub fn generate_emblems_full(
+    master_data_dir: &Path,
+    output_path: &Path,
+) -> anyhow::Result<usize> {
+    use std::collections::HashMap;
+
+    let chs_dir = master_data_dir.join("Chs");
+    let emblem_master: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "EmblemMaster.json")?;
+    let emblem_category: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "EmblemCategotyMaster.json")?;
+
+    // 分类 ID → text key
+    let cat_key_map: HashMap<i64, String> = emblem_category.iter()
+        .filter_map(|r| {
+            let id = r[0].as_i64()?;
+            let key = r[1].as_str()?.to_string();
+            Some((id, key))
+        })
+        .collect();
+
+    // 5 语言 MasterTextLabel
+    let langs = ["Chs", "Eng", "Jpn", "Kor", "Cht"];
+    let mut mtl_all: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for lang in &langs {
+        let mtl: Vec<Vec<serde_json::Value>> = read_json_table(
+            &master_data_dir.join(lang), "MasterTextLabel.json"
+        )?;
+        let mut map = HashMap::new();
+        for r in &mtl {
+            let key = r[0].as_str().unwrap_or("").to_string();
+            let val = r[1].as_str().unwrap_or("").to_string();
+            if !key.is_empty() { map.insert(key, val); }
+        }
+        mtl_all.insert(lang.to_string(), map);
+    }
+
+    // 获取多语言 category 文本
+    let get_cat_text = |lang: &str, cat_id: i64| -> String {
+        let text_key = cat_key_map.get(&cat_id).cloned().unwrap_or_default();
+        mtl_all.get(lang)
+            .and_then(|m| m.get(&text_key))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // cards_full.json 索引: card_style_id → card entry
+    let cards_path = output_path.parent()
+        .map(|p| p.join("cards_full.json"))
+        .unwrap_or_else(|| PathBuf::from("cards_full.json"));
+    let card_index: HashMap<i64, CardFullEntry> = if cards_path.exists() {
+        let raw = std::fs::read_to_string(&cards_path)?;
+        let cards: Vec<CardFullEntry> = serde_json::from_str(&raw).unwrap_or_default();
+        cards.into_iter()
+            .filter(|c| !c.is_evolution)
+            .map(|c| (c.card_style_id, c))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    // 构建条目
+    let mut entries: Vec<EmblemFullEntry> = Vec::new();
+    for row in &emblem_master {
+        let emblem_id = row[0].as_i64().unwrap_or(0);
+        if emblem_id == 0 { continue; }
+        let name_jpn = row[2].as_str().unwrap_or("").to_string();
+        let resource_name = row[3].as_str().unwrap_or("").to_string();
+        let category = row[4].as_i64().unwrap_or(0);
+        let parent_id = row[5].as_i64().unwrap_or(0);
+        let is_premium = row[7].as_i64().unwrap_or(0) == 1;
+
+        // 分类名（5 语言）
+        let cat_chs = get_cat_text("Chs", category);
+        let cat_eng = get_cat_text("Eng", category);
+        let cat_jpn = get_cat_text("Jpn", category);
+        let cat_kor = get_cat_text("Kor", category);
+        let cat_cht = get_cat_text("Cht", category);
+
+        // 关联卡牌: 用 emblem_id 或 parent_id 作为 card_style_id
+        let lookup_id = if parent_id != 0 { parent_id } else { emblem_id };
+        let card = card_index.get(&lookup_id);
+
+        entries.push(EmblemFullEntry {
+            emblem_id,
+            resource_name,
+            name_jpn,
+            category,
+            category_name_chs: cat_chs,
+            category_name_eng: cat_eng,
+            category_name_jpn: cat_jpn,
+            category_name_kor: cat_kor,
+            category_name_cht: cat_cht,
+            is_premium,
+            parent_emblem_id: if parent_id != 0 { Some(parent_id) } else { None },
+            card_id: card.map(|c| c.card_id),
+            card_name_chs: card.map(|c| c.name_chs.clone()),
+            card_name_eng: card.map(|c| c.name_eng.clone()),
+            card_name_jpn: card.map(|c| c.name_jpn.clone()),
+            card_name_kor: card.map(|c| c.name_kor.clone()),
+            card_name_cht: card.map(|c| c.name_cht.clone()),
+        });
+    }
+
+    let count = entries.len();
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&entries)?;
+    std::fs::write(output_path, json)?;
+    Ok(count)
+}
+
+/// emblems_full.json 的单条记录
+#[derive(Debug, Clone, serde::Serialize)]
+struct EmblemFullEntry {
+    emblem_id: i64,
+    resource_name: String,
+    name_jpn: String,
+    category: i64,
+    category_name_chs: String,
+    category_name_eng: String,
+    category_name_jpn: String,
+    category_name_kor: String,
+    category_name_cht: String,
+    is_premium: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_emblem_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card_name_chs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card_name_eng: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card_name_jpn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card_name_kor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card_name_cht: Option<String>,
+}
+
 
 // ---------------------------------------------------------------------------
 // 测试

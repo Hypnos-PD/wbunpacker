@@ -99,6 +99,8 @@ enum MasterCmd {
     Cards,
     /// 生成 pack_names.json：从多语言 MasterTextLabel 提取卡包名称
     Packs,
+    /// 生成 emblems_full.json：合并 EmblemMaster + 多语言分类文本 + 关联卡名
+    Emblems,
 }
 
 #[derive(Subcommand)]
@@ -126,6 +128,12 @@ enum TextureCmd {
     },
     /// 提取 Card2D 卡牌边框: UI/Card2D/frame2d_*.ab -> PNG
     CardFrames {
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+    },
+    /// 提取徽章纹理: UI/Emblem/utx_tex_em_*.ab -> PNG
+    Emblems {
         /// AssetStudio CLI 路径（覆盖配置文件）
         #[arg(long)]
         asset_studio: Option<String>,
@@ -337,6 +345,13 @@ async fn main() -> anyhow::Result<()> {
                     std::fs::write(&output_path, json)?;
                     println!("完成: {} 个卡包 => {}", packs.len(), output_path.display());
                 }
+                Some(MasterCmd::Emblems) => {
+                    let master_data_dir = data_dir.join("exports").join("master-data");
+                    let output_path = data_dir.join("exports").join("analysis").join("emblems_full.json");
+                    println!("生成 emblems_full.json...");
+                    let count = master_data::generate_emblems_full(&master_data_dir, &output_path)?;
+                    println!("完成: {} 个徽章 => {}", count, output_path.display());
+                }
                 Some(MasterCmd::Cards) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
                     let output_path = data_dir.join("exports").join("analysis").join("cards_full.json");
@@ -474,6 +489,15 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_card_frames(data_dir, &as_path)?;
+            }
+            TextureCmd::Emblems { asset_studio } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                texture::process_emblems(data_dir, &as_path)?;
             }
         },
         Command::Render { sub } => match sub {
