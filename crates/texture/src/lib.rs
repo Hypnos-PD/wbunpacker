@@ -58,6 +58,9 @@ const CARD_CLASS_ICON_SOURCE_FILE: &str = "Atlas/Card2D.ab";
 
 /// Emblem 徽章资源目录。
 const EMBLEM_SOURCE_DIR: &str = "UI/Emblem";
+/// Stamp 贴图资源目录。
+const STAMP_SOURCE_DIR: &str = "UI/Stamp";
+
 
 /// 需要跳过的子路径
 const SKIP_PATTERNS: &[&str] = &["HighFoil"];
@@ -143,6 +146,13 @@ pub fn process_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow:
 pub fn process_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
     extract_emblems(data_dir, asset_studio_path)
 }
+/// 提取贴图纹理: 从 UI/Stamp 解密 AB 中导出 PNG。
+///
+/// 增量: 基于 SHA256 跳过已提取且未变化的。
+pub fn process_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> anyhow::Result<()> {
+    extract_stamps(data_dir, asset_studio_path, variant)
+}
+
 
 /// 渲染单张完整卡牌图。
 pub fn render_card_image(
@@ -1434,6 +1444,185 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
     println!("徽章提取完成: 更新 {} 个", exported);
     Ok(())
 }
+// ============================================================================
+// stamp 提取
+// ============================================================================
+
+/// 从 UI/Stamp 解密 AB 中导出 PNG。
+///
+/// 流程:
+/// 1. 扫描 variants/Chs/decrypted/UI/Stamp/stamp_*.ab
+/// 2. SHA256 增量跳过（缓存 .hashes.json）
+/// 3. AssetStudio tex2d 导出
+/// 4. 重命名为 {resource_id}.png → exports/stamps/
+fn extract_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> anyhow::Result<()> {
+    use sha2::Digest;
+    use std::collections::BTreeMap;
+    use std::io::Read;
+
+    let source_dir = data_dir
+        .join("variants")
+        .join(variant)
+        .join("decrypted")
+        .join(STAMP_SOURCE_DIR);
+
+    if !source_dir.exists() {
+        anyhow::bail!(
+            "贴图源目录不存在: {}（请先运行 wbu asset batch -v {variant}）",
+            source_dir.display()
+        );
+    }
+
+    let output_dir = data_dir.join("exports").join("stamps").join(variant);
+    std::fs::create_dir_all(&output_dir)?;
+
+    // 加载哈希缓存（resource_id → sha256）
+    let hash_cache_path = output_dir.join(".hashes.json");
+    let hash_cache: BTreeMap<String, String> = if hash_cache_path.exists() {
+        let raw = std::fs::read_to_string(&hash_cache_path)?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+
+    // 扫描 stamp_*.ab
+    let bundles: Vec<_> = std::fs::read_dir(&source_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("stamp_") && name.ends_with(".ab")
+        })
+        .collect();
+
+    if bundles.is_empty() {
+        println!("UI/Stamp 目录为空，跳过");
+        return Ok(());
+    }
+
+    // 增量检查
+    let mut stale_ids: Vec<String> = Vec::new();
+    let mut current_hashes: BTreeMap<String, String> = BTreeMap::new();
+
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // stamp_100001.ab → 100001
+        let id = name
+            .strip_prefix("stamp_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name)
+            .to_string();
+
+        let mut file = std::fs::File::open(entry.path())?;
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        current_hashes.insert(id.clone(), hash.clone());
+
+        let png_path = output_dir.join(format!("{}.png", &id));
+        if !png_path.exists() || hash_cache.get(&id) != Some(&hash) {
+            stale_ids.push(id);
+        }
+    }
+
+    if stale_ids.is_empty() {
+        println!("stamps 全部为最新（{} 个），跳过", bundles.len());
+        let json = serde_json::to_string_pretty(&current_hashes)?;
+        std::fs::write(&hash_cache_path, json)?;
+        return Ok(());
+    }
+
+    println!(
+        "需要更新 {} 个贴图（共 {} 个，{} 个已是最新）",
+        stale_ids.len(),
+        bundles.len(),
+        bundles.len() - stale_ids.len()
+    );
+
+    let temp_input = output_dir.join(".temp_input");
+    let temp_output = output_dir.join(".temp_output");
+    if temp_input.exists() { std::fs::remove_dir_all(&temp_input)?; }
+    if temp_output.exists() { std::fs::remove_dir_all(&temp_output)?; }
+    std::fs::create_dir_all(&temp_input)?;
+    std::fs::create_dir_all(&temp_output)?;
+
+    // 只复制需要更新的 bundle
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("stamp_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name);
+        if stale_ids.contains(&id.to_string()) {
+            std::fs::copy(entry.path(), temp_input.join(entry.file_name()))?;
+        }
+    }
+
+    // AssetStudio 导出
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} AssetStudio 导出贴图中... {elapsed}").unwrap(),
+    );
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let status = Command::new(asset_studio_path)
+        .arg(&temp_input)
+        .args([
+            "-t", "tex2d",
+            "-g", "fileName",
+            "-f", "assetName",
+            "-o", &temp_output.to_string_lossy(),
+            "--unity-version", UNITY_VERSION,
+            "--log-level", "warning",
+        ])
+        .status()
+        .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
+
+    spinner.finish_and_clear();
+
+    if !status.success() {
+        anyhow::bail!("AssetStudio 退出码: {:?}", status.code());
+    }
+
+    // 收集并重命名 PNG
+    let mut exported = 0usize;
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("stamp_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name);
+
+        if !stale_ids.contains(&id.to_string()) { continue; }
+
+        let dest = output_dir.join(format!("{}.png", id));
+        let export_dir = temp_output.join(format!("{}_export", name));
+        if let Ok(pngs) = find_pngs(&export_dir) {
+            if let Some(png_path) = pngs.first() {
+                std::fs::rename(png_path, &dest)?;
+                exported += 1;
+                debug!("贴图更新: {} -> {}", id, dest.display());
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_input);
+    let _ = std::fs::remove_dir_all(&temp_output);
+
+    let json = serde_json::to_string_pretty(&current_hashes)?;
+    std::fs::write(&hash_cache_path, json)?;
+
+    println!("贴图提取完成: 更新 {} 个", exported);
+    Ok(())
+}
+
 
 fn run_asset_studio_on_dir(
     input_dir: &Path,

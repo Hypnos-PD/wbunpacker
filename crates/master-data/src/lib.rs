@@ -589,6 +589,163 @@ struct EmblemFullEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     card_name_cht: Option<String>,
 }
+// ---------------------------------------------------------------------------
+// stamps_full.json 生成
+// ---------------------------------------------------------------------------
+
+/// 从 Stamp + StampCategory + 多语言 MasterTextLabel 生成 stamps_full.json。
+///
+/// 需要先运行 wbu master -v all 导出所有 5 语言的主数据表。
+///
+/// # 参数
+/// - master_data_dir: exports/master-data/ 目录（下面有 Chs/ Eng/ Jpn/ Kor/ Cht/ 子目录）
+/// - output_path: stamps_full.json 输出路径
+pub fn generate_stamps_full(
+    master_data_dir: &Path,
+    output_path: &Path,
+) -> anyhow::Result<usize> {
+    use std::collections::HashMap;
+
+    let chs_dir = master_data_dir.join("Chs");
+    let stamp_master: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "Stamp.json")?;
+    let stamp_category: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "StampCategory.json")?;
+    let chat_stamp: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "ChatStampMaster.json")?;
+
+    // 分类 ID → text key
+    let cat_key_map: HashMap<i64, String> = stamp_category.iter()
+        .filter_map(|r| {
+            let id = r[0].as_i64()?;
+            let key = r[1].as_str()?.to_string();
+            Some((id, key))
+        })
+        .collect();
+
+    // 5 语言 MasterTextLabel
+    let langs = ["Chs", "Eng", "Jpn", "Kor", "Cht"];
+    let mut mtl_all: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for lang in &langs {
+        let mtl: Vec<Vec<serde_json::Value>> = read_json_table(
+            &master_data_dir.join(lang), "MasterTextLabel.json"
+        )?;
+        let mut map = HashMap::new();
+        for r in &mtl {
+            let key = r[0].as_str().unwrap_or("").to_string();
+            let val = r[1].as_str().unwrap_or("").to_string();
+            if !key.is_empty() { map.insert(key, val); }
+        }
+        mtl_all.insert(lang.to_string(), map);
+    }
+
+    // 获取多语言分类名
+    let get_cat_text = |lang: &str, cat_id: i64| -> String {
+        let text_key = cat_key_map.get(&cat_id).cloned().unwrap_or_default();
+        mtl_all.get(lang)
+            .and_then(|m| m.get(&text_key))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // 获取多语言 stamp 名称
+    let get_name = |lang: &str, text_key: &str| -> String {
+        mtl_all.get(lang)
+            .and_then(|m| m.get(text_key))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // ChatStamp 索引: id → 5 语言文本
+    // ChatStampMaster 只存日文，需要从 MasterTextLabel 查 ChatStampText_{id}
+    let chat_texts: HashMap<i64, (String, String, String, String, String)> = chat_stamp.iter()
+        .filter_map(|r| {
+            let id = r[0].as_i64()?;
+            let key = format!("ChatStampText_{id}");
+            let chs = mtl_all.get("Chs").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
+            let eng = mtl_all.get("Eng").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
+            let jpn = mtl_all.get("Jpn").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
+            let kor = mtl_all.get("Kor").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
+            let cht = mtl_all.get("Cht").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
+            Some((id, (chs, eng, jpn, kor, cht)))
+        })
+        .collect();
+
+    // 构建条目
+    let mut entries: Vec<StampFullEntry> = Vec::new();
+    for row in &stamp_master {
+        let stamp_id = row[0].as_i64().unwrap_or(0);
+        if stamp_id == 0 { continue; }
+        let category = row[1].as_i64().unwrap_or(0);
+        let resource_name = row[2].as_str().unwrap_or("").to_string();
+        let enabled = row[3].as_bool().unwrap_or(true);
+        let sort_order = row[4].as_i64().unwrap_or(0);
+        let name_key = row[5].as_str().unwrap_or("").to_string();
+
+        // 如果 name_key 以 ChatStampText_ 开头，说明是聊天贴图
+        let is_chat = name_key.starts_with("ChatStampText_");
+        let (name_chs, name_eng, name_jpn, name_kor, name_cht) = if is_chat {
+            // 聊天贴图的文本从 ChatStampMaster 索引取
+            let chat_id: i64 = name_key.strip_prefix("ChatStampText_")
+                .and_then(|s| s.parse().ok()).unwrap_or(0);
+            chat_texts.get(&chat_id).cloned().unwrap_or_default()
+        } else {
+            (
+                get_name("Chs", &name_key),
+                get_name("Eng", &name_key),
+                get_name("Jpn", &name_key),
+                get_name("Kor", &name_key),
+                get_name("Cht", &name_key),
+            )
+        };
+
+        entries.push(StampFullEntry {
+            stamp_id,
+            resource_name,
+            category,
+            category_name_chs: get_cat_text("Chs", category),
+            category_name_eng: get_cat_text("Eng", category),
+            category_name_jpn: get_cat_text("Jpn", category),
+            category_name_kor: get_cat_text("Kor", category),
+            category_name_cht: get_cat_text("Cht", category),
+            enabled,
+            sort_order,
+            name_chs,
+            name_eng,
+            name_jpn,
+            name_kor,
+            name_cht,
+            is_chat,
+        });
+    }
+
+    let count = entries.len();
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&entries)?;
+    std::fs::write(output_path, json)?;
+    Ok(count)
+}
+
+/// stamps_full.json 的单条记录
+#[derive(Debug, Clone, serde::Serialize)]
+struct StampFullEntry {
+    stamp_id: i64,
+    resource_name: String,
+    category: i64,
+    category_name_chs: String,
+    category_name_eng: String,
+    category_name_jpn: String,
+    category_name_kor: String,
+    category_name_cht: String,
+    enabled: bool,
+    sort_order: i64,
+    name_chs: String,
+    name_eng: String,
+    name_jpn: String,
+    name_kor: String,
+    name_cht: String,
+    is_chat: bool,
+}
+
 
 
 // ---------------------------------------------------------------------------

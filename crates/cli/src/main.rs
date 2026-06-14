@@ -101,6 +101,8 @@ enum MasterCmd {
     Packs,
     /// 生成 emblems_full.json：合并 EmblemMaster + 多语言分类文本 + 关联卡名
     Emblems,
+    /// 生成 stamps_full.json：合并 Stamp + StampCategory + 多语言名称
+    Stamps,
 }
 
 #[derive(Subcommand)]
@@ -137,6 +139,15 @@ enum TextureCmd {
         /// AssetStudio CLI 路径（覆盖配置文件）
         #[arg(long)]
         asset_studio: Option<String>,
+    },
+    /// 提取贴图纹理: UI/Stamp/stamp_*.ab -> PNG
+    Stamps {
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+        /// 语言变体: Chs/Eng/Jpn/Kor/Cht，或 all
+        #[arg(short, long, default_value = "Chs")]
+        variant: String,
     },
 }
 
@@ -352,6 +363,13 @@ async fn main() -> anyhow::Result<()> {
                     let count = master_data::generate_emblems_full(&master_data_dir, &output_path)?;
                     println!("完成: {} 个徽章 => {}", count, output_path.display());
                 }
+                Some(MasterCmd::Stamps) => {
+                    let master_data_dir = data_dir.join("exports").join("master-data");
+                    let output_path = data_dir.join("exports").join("analysis").join("stamps_full.json");
+                    println!("生成 stamps_full.json...");
+                    let count = master_data::generate_stamps_full(&master_data_dir, &output_path)?;
+                    println!("完成: {} 个贴图 => {}", count, output_path.display());
+                }
                 Some(MasterCmd::Cards) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
                     let output_path = data_dir.join("exports").join("analysis").join("cards_full.json");
@@ -498,6 +516,17 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_emblems(data_dir, &as_path)?;
+            }
+            TextureCmd::Stamps { asset_studio, variant } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                for v in expand_variants(&variant) {
+                    texture::process_stamps(data_dir, &as_path, &v)?;
+                }
             }
         },
         Command::Render { sub } => match sub {
