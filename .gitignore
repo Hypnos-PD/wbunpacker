@@ -3,3 +3,4 @@ data/
 config/Config.local.toml
 .env
 temp/
+assets/fonts/dfweibeiw7-gb.ttc
