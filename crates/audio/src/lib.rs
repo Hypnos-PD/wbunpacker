@@ -93,6 +93,11 @@ pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
         return HashMap::new();
     }
 
+    let didx_entries = parse_didx_data(data);
+    if !didx_entries.is_empty() {
+        return didx_entries;
+    }
+
     let hdr_size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
     let file_size = data.len();
 
@@ -146,6 +151,61 @@ pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
     }
 
     entries
+}
+
+fn parse_didx_data(data: &[u8]) -> HashMap<u32, u32> {
+    let mut entries = HashMap::new();
+    let didx_pos = match find_magic(data, b"DIDX") {
+        Some(pos) => pos,
+        None => return entries,
+    };
+    let data_pos = match find_magic(data, b"DATA") {
+        Some(pos) => pos,
+        None => return entries,
+    };
+    if didx_pos + 8 > data.len() || data_pos + 8 > data.len() {
+        return entries;
+    }
+
+    let didx_size = u32::from_le_bytes([
+        data[didx_pos + 4],
+        data[didx_pos + 5],
+        data[didx_pos + 6],
+        data[didx_pos + 7],
+    ]) as usize;
+    let data_size = u32::from_le_bytes([
+        data[data_pos + 4],
+        data[data_pos + 5],
+        data[data_pos + 6],
+        data[data_pos + 7],
+    ]) as usize;
+    let didx_start = didx_pos + 8;
+    let data_start = data_pos + 8;
+    let didx_end = didx_start.saturating_add(didx_size).min(data.len());
+    let data_end = data_start.saturating_add(data_size).min(data.len());
+    if didx_start > didx_end || data_start > data_end {
+        return entries;
+    }
+
+    for chunk in data[didx_start..didx_end].chunks_exact(12) {
+        let wem_id = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let rel_offset = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]) as usize;
+        let size = u32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]) as usize;
+        let offset = data_start.saturating_add(rel_offset);
+        if wem_id != 0
+            && offset + 8 <= data_end
+            && offset.saturating_add(size) <= data_end
+            && &data[offset..offset + 4] == RIFF_MAGIC
+        {
+            entries.insert(wem_id, offset as u32);
+        }
+    }
+
+    entries
+}
+
+fn find_magic(data: &[u8], magic: &[u8; 4]) -> Option<usize> {
+    data.windows(4).position(|w| w == magic)
 }
 
 // ============================================================================
@@ -452,5 +512,25 @@ mod tests {
     fn test_akpk_magic_value() {
         assert_eq!(AKPK_MAGIC, b"AKPK");
         assert_eq!(BKHD_MAGIC, b"BKHD");
+    }
+
+    #[test]
+    fn test_parse_akpk_didx_data() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"AKPK");
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(b"DIDX");
+        data.extend_from_slice(&12u32.to_le_bytes());
+        data.extend_from_slice(&123456u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&12u32.to_le_bytes());
+        data.extend_from_slice(b"DATA");
+        data.extend_from_slice(&12u32.to_le_bytes());
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(b"WAVE");
+
+        let entries = parse_akpk(&data);
+        assert_eq!(entries.get(&123456), Some(&36));
     }
 }

@@ -588,7 +588,8 @@ mod tests {
         assert!(total > 0, "应从 mx pck 解析出 wem→event 映射");
 
         // 完整管线
-        let mapping = build_wem_mapping_for_pck(&mapping_data, &pck_data).unwrap();
+        let pck_refs = [(std::path::Path::new(pck_path), pck_data.as_slice())];
+        let mapping = build_global_wem_mapping(&mapping_data, &pck_refs).unwrap();
         assert!(!mapping.is_empty(), "完整管线应产出映射");
         println!("完整管线产出 {} 个 wem→event 映射", mapping.len());
         for (wem_id, name) in mapping.iter().take(3) {
