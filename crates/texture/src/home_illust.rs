@@ -880,12 +880,12 @@ fn vec3_after(text: &str, key: &str) -> Option<Vec3> {
     let mut z = None;
     for line in rest.lines().skip(1) {
         let trimmed = line.trim();
-        if trimmed.starts_with("x = ") {
-            x = parse_f64_prefix(trimmed.trim_start_matches("x = "));
-        } else if trimmed.starts_with("y = ") {
-            y = parse_f64_prefix(trimmed.trim_start_matches("y = "));
-        } else if trimmed.starts_with("z = ") {
-            z = parse_f64_prefix(trimmed.trim_start_matches("z = "));
+        if let Some(value) = vector_component_value(trimmed, "x") {
+            x = parse_f64_prefix(value);
+        } else if let Some(value) = vector_component_value(trimmed, "y") {
+            y = parse_f64_prefix(value);
+        } else if let Some(value) = vector_component_value(trimmed, "z") {
+            z = parse_f64_prefix(value);
         } else if x.is_some() || y.is_some() || z.is_some() {
             break;
         }
@@ -898,6 +898,11 @@ fn vec3_after(text: &str, key: &str) -> Option<Vec3> {
         y: y?,
         z: z?,
     })
+}
+
+fn vector_component_value<'a>(line: &'a str, axis: &str) -> Option<&'a str> {
+    line.strip_prefix(&format!("{axis} = "))
+        .or_else(|| line.strip_prefix(&format!("float {axis} = ")))
 }
 
 fn parse_i64_prefix(text: &str) -> Option<i64> {
