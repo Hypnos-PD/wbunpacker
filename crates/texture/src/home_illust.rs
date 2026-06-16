@@ -26,7 +26,8 @@
 
 use anyhow::{bail, Context};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +61,34 @@ struct AspectLayout {
     scale_y: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+struct HomePosition {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct PrefabTransformNode {
+    name: String,
+    local_position: Vec3,
+    local_scale: Vec3,
+    world_position: Vec3,
+    world_scale: Vec3,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct PrefabTransforms {
+    prefab_scale: f64,
+    nodes: BTreeMap<String, PrefabTransformNode>,
+}
+
 /// 从主数据预加载的映射表（仅用于角色名查找）
 struct HomeIllustMeta {
     /// leader_skin_id → 角色名（日文，来自 LeaderSkinMaster）
@@ -68,6 +97,8 @@ struct HomeIllustMeta {
     card_name_labels: HashMap<i64, String>,
     /// variant → (label → 本地化文本)
     text_labels: HashMap<String, HashMap<String, String>>,
+    /// hi_id → HomeIllustrationMaster 坐标。Unity UI 坐标以画面中心为原点。
+    home_positions: HashMap<i64, HomePosition>,
 }
 
 /// 最终输出的 config.json
@@ -75,6 +106,8 @@ struct HomeIllustMeta {
 struct IllustConfig {
     /// hi_ ID 字符串
     id: String,
+    /// 源 AssetBundle 的 SHA256，用于可更新增量导出。
+    source_hash: String,
     /// 角色名（日文/通用）
     character_name: Option<String>,
     /// 各语言本地化名 { "chs": "...", "eng": "...", ... }
@@ -95,6 +128,9 @@ struct IllustConfig {
     physics_position_factor: [f32; 2],
     physics_rotation_factor: f32,
     has_screen_blend: bool,
+    skeleton_scale: f64,
+    home_position: Option<HomePosition>,
+    prefab_transforms: PrefabTransforms,
     aspect_layouts: HashMap<String, AspectLayout>,
     bg_textures: Vec<String>,
     has_effects: bool,
@@ -103,9 +139,7 @@ struct IllustConfig {
 /// 提取上下文
 struct ExtractCtx<'a> {
     meta: &'a HomeIllustMeta,
-    data_dir: &'a Path,
     asset_studio_path: &'a Path,
-    copy_voices: bool,
 }
 
 // ============================================================================
@@ -168,9 +202,7 @@ pub fn process_home_illustrations(
 
     let ctx = ExtractCtx {
         meta: &meta,
-        data_dir,
         asset_studio_path,
-        copy_voices,
     };
 
     let mut stats = HomeIllustStats::default();
@@ -181,14 +213,18 @@ pub fn process_home_illustrations(
 
         pb.set_message(stem.clone());
 
-        // 增量跳过
-        if output_dir.join("config.json").exists() {
+        let source_hash = sha256_file(ab_path)?;
+
+        // 增量跳过：只有源 AssetBundle hash 未变化时才跳过。
+        if output_dir.join("config.json").exists()
+            && config_source_hash(&output_dir.join("config.json")).as_deref() == Some(&source_hash)
+        {
             stats.skipped += 1;
             pb.inc(1);
             continue;
         }
 
-        match extract_one(ab_path, &output_dir, &ctx) {
+        match extract_one(ab_path, &output_dir, &ctx, source_hash) {
             Ok(()) => stats.processed += 1,
             Err(e) => {
                 tracing::error!("{stem}: {e}");
@@ -288,10 +324,30 @@ fn load_master_data(data_dir: &Path) -> anyhow::Result<HomeIllustMeta> {
         text_labels.insert(vkey.to_string(), map);
     }
 
+    // 4. HomeIllustrationMaster stores the in-game UI position in the
+    // HomeIllustration window coordinate space. The window center is (0, 0).
+    let mut home_positions = HashMap::new();
+    let hi_path = master_root.join("Chs").join("HomeIllustrationMaster.json");
+    if hi_path.exists() {
+        let raw: Vec<serde_json::Value> = serde_json::from_str(
+            &fs::read_to_string(&hi_path)
+                .with_context(|| format!("无法读取 {}", hi_path.display()))?,
+        )?;
+        for row in &raw {
+            let Some(id) = row.get(0).and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let x = row.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y = row.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            home_positions.insert(id, HomePosition { x, y });
+        }
+    }
+
     Ok(HomeIllustMeta {
         leader_names,
         card_name_labels,
         text_labels,
+        home_positions,
     })
 }
 
@@ -343,7 +399,12 @@ fn lookup_character_names(meta: &HomeIllustMeta, hi_id: i64) -> (Option<String>,
 // 单文件提取
 // ============================================================================
 
-fn extract_one(ab_path: &Path, output_dir: &Path, ctx: &ExtractCtx) -> anyhow::Result<()> {
+fn extract_one(
+    ab_path: &Path,
+    output_dir: &Path,
+    ctx: &ExtractCtx,
+    source_hash: String,
+) -> anyhow::Result<()> {
     let stem = ab_path.file_stem().unwrap().to_string_lossy().to_string();
 
     // 清理旧数据
@@ -360,6 +421,7 @@ fn extract_one(ab_path: &Path, output_dir: &Path, ctx: &ExtractCtx) -> anyhow::R
 
     // 1. AssetStudio 导出全部资产
     run_asset_studio_single(ab_path, &temp_dir, ctx.asset_studio_path)?;
+    run_asset_studio_dump_single(ab_path, &temp_dir, ctx.asset_studio_path)?;
 
     // 2. 找到导出的子目录
     let export_subdirs: Vec<PathBuf> = fs::read_dir(&temp_dir)?
@@ -378,6 +440,8 @@ fn extract_one(ab_path: &Path, output_dir: &Path, ctx: &ExtractCtx) -> anyhow::R
         let cab_dir = find_single_subdir(subdir)?;
         collect_files(&cab_dir, &mut all_files);
     }
+
+    let prefab_transforms = parse_prefab_transforms(&stem, &all_files);
 
     // 3. 分类文件
     fs::create_dir_all(output_dir)?;
@@ -443,12 +507,14 @@ fn extract_one(ab_path: &Path, output_dir: &Path, ctx: &ExtractCtx) -> anyhow::R
     let hi_id = parse_hi_id(&stem);
     let config = build_config(
         &stem,
+        source_hash,
         hi_id,
         ctx.meta,
         &leader_skin_setting,
         &skeleton_anim,
         &transform_adjuster,
         skeleton_data.as_ref(),
+        prefab_transforms,
         &bg_pngs,
         has_effects,
     );
@@ -498,6 +564,37 @@ fn run_asset_studio_single(
     Ok(())
 }
 
+fn run_asset_studio_dump_single(
+    ab_path: &Path,
+    output_dir: &Path,
+    asset_studio_path: &Path,
+) -> anyhow::Result<()> {
+    let status = Command::new(asset_studio_path)
+        .arg(ab_path)
+        .args([
+            "-m",
+            "dump",
+            "--load-all",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName_pathID",
+            "-o",
+            &output_dir.to_string_lossy(),
+            "--unity-version",
+            UNITY_VERSION,
+            "--log-level",
+            "warning",
+        ])
+        .status()
+        .with_context(|| format!("无法启动 AssetStudio dump: {}", asset_studio_path.display()))?;
+
+    if !status.success() {
+        bail!("AssetStudio dump 退出码: {:?}", status.code());
+    }
+    Ok(())
+}
+
 fn find_single_subdir(dir: &Path) -> anyhow::Result<PathBuf> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -519,6 +616,320 @@ fn collect_files(dir: &Path, result: &mut Vec<PathBuf>) {
             }
         }
     }
+}
+
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let data = fs::read(path).with_context(|| format!("无法读取 {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn config_source_hash(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("source_hash")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+}
+
+#[derive(Debug, Default)]
+struct DumpGameObject {
+    name: String,
+    transform_id: i64,
+}
+
+#[derive(Debug, Default)]
+struct DumpTransform {
+    game_object_id: i64,
+    father_id: i64,
+    children: Vec<i64>,
+    local_position: Vec3,
+    local_scale: Vec3,
+}
+
+fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
+    let mut game_objects: HashMap<i64, DumpGameObject> = HashMap::new();
+    let mut transforms: HashMap<i64, DumpTransform> = HashMap::new();
+
+    for file in files {
+        if file.extension().and_then(|s| s.to_str()) != Some("txt") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(file) else {
+            continue;
+        };
+        let path_id = path_id_from_name(file).unwrap_or_default();
+        if text.contains("GameObject Base") {
+            let name = string_after(&text, "m_Name").unwrap_or_default();
+            let transform_id = first_file_id_after(&text, "m_Component").unwrap_or_default();
+            if path_id != 0 {
+                game_objects.insert(path_id, DumpGameObject { name, transform_id });
+            }
+        } else if text.contains("Transform Base") || text.contains("RectTransform Base") {
+            let game_object_id = first_file_id_after(&text, "m_GameObject").unwrap_or_default();
+            let father_id = first_file_id_after(&text, "m_Father").unwrap_or_default();
+            let children = file_ids_after(&text, "m_Children");
+            let local_position = vec3_after(&text, "m_LocalPosition").unwrap_or_default();
+            let local_scale = vec3_after(&text, "m_LocalScale").unwrap_or(Vec3 {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+            });
+            if path_id != 0 {
+                transforms.insert(
+                    path_id,
+                    DumpTransform {
+                        game_object_id,
+                        father_id,
+                        children,
+                        local_position,
+                        local_scale,
+                    },
+                );
+            }
+        }
+    }
+
+    let mut nodes = BTreeMap::new();
+    let root_transform = game_objects
+        .values()
+        .find(|go| go.name == stem)
+        .map(|go| go.transform_id);
+    let character_transform = transform_by_go_name(&game_objects, "Character");
+    let spine_root_transform = transform_by_go_name(&game_objects, &format!("spine_{stem}"));
+    let spine_object_transform = game_objects
+        .values()
+        .filter(|go| go.name == stem)
+        .map(|go| go.transform_id)
+        .find(|id| Some(*id) != root_transform)
+        .or(spine_root_transform);
+    let bg_transform = transform_by_go_name(&game_objects, &format!("bg_{stem}"))
+        .or_else(|| transform_by_go_name(&game_objects, "BG"));
+
+    add_transform_node("root", root_transform, &game_objects, &transforms, &mut nodes);
+    add_transform_node(
+        "character",
+        character_transform,
+        &game_objects,
+        &transforms,
+        &mut nodes,
+    );
+    add_transform_node(
+        "spineRoot",
+        spine_root_transform,
+        &game_objects,
+        &transforms,
+        &mut nodes,
+    );
+    add_transform_node(
+        "spineObject",
+        spine_object_transform,
+        &game_objects,
+        &transforms,
+        &mut nodes,
+    );
+    add_transform_node("background", bg_transform, &game_objects, &transforms, &mut nodes);
+    if let Some(bg) = bg_transform.and_then(|id| transforms.get(&id)) {
+        if let Some(child_id) = bg.children.first().copied() {
+            add_transform_node(
+                "backgroundQuad",
+                Some(child_id),
+                &game_objects,
+                &transforms,
+                &mut nodes,
+            );
+        }
+    }
+
+    let prefab_scale = spine_object_transform
+        .map(|id| world_scale(id, &transforms).x)
+        .or_else(|| spine_root_transform.map(|id| world_scale(id, &transforms).x))
+        .unwrap_or(1.0);
+
+    PrefabTransforms {
+        prefab_scale,
+        nodes,
+    }
+}
+
+fn transform_by_go_name(
+    game_objects: &HashMap<i64, DumpGameObject>,
+    name: &str,
+) -> Option<i64> {
+    game_objects
+        .values()
+        .find(|go| go.name == name)
+        .map(|go| go.transform_id)
+}
+
+fn add_transform_node(
+    key: &str,
+    transform_id: Option<i64>,
+    game_objects: &HashMap<i64, DumpGameObject>,
+    transforms: &HashMap<i64, DumpTransform>,
+    nodes: &mut BTreeMap<String, PrefabTransformNode>,
+) {
+    let Some(id) = transform_id else {
+        return;
+    };
+    let Some(transform) = transforms.get(&id) else {
+        return;
+    };
+    let name = game_objects
+        .get(&transform.game_object_id)
+        .map(|go| go.name.clone())
+        .unwrap_or_else(|| key.to_string());
+    nodes.insert(
+        key.to_string(),
+        PrefabTransformNode {
+            name,
+            local_position: transform.local_position,
+            local_scale: transform.local_scale,
+            world_position: world_position(id, transforms),
+            world_scale: world_scale(id, transforms),
+        },
+    );
+}
+
+fn world_position(id: i64, transforms: &HashMap<i64, DumpTransform>) -> Vec3 {
+    let Some(t) = transforms.get(&id) else {
+        return Vec3::default();
+    };
+    if t.father_id == 0 {
+        return t.local_position;
+    }
+    let parent_pos = world_position(t.father_id, transforms);
+    let parent_scale = world_scale(t.father_id, transforms);
+    Vec3 {
+        x: parent_pos.x + t.local_position.x * parent_scale.x,
+        y: parent_pos.y + t.local_position.y * parent_scale.y,
+        z: parent_pos.z + t.local_position.z * parent_scale.z,
+    }
+}
+
+fn world_scale(id: i64, transforms: &HashMap<i64, DumpTransform>) -> Vec3 {
+    let Some(t) = transforms.get(&id) else {
+        return Vec3 {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+        };
+    };
+    if t.father_id == 0 {
+        return t.local_scale;
+    }
+    let parent = world_scale(t.father_id, transforms);
+    Vec3 {
+        x: parent.x * t.local_scale.x,
+        y: parent.y * t.local_scale.y,
+        z: parent.z * t.local_scale.z,
+    }
+}
+
+fn path_id_from_name(path: &Path) -> Option<i64> {
+    let stem = path.file_stem()?.to_string_lossy();
+    stem.rsplit('_').next()?.parse().ok()
+}
+
+fn string_after(text: &str, key: &str) -> Option<String> {
+    let pos = text.find(key)?;
+    let rest = &text[pos..];
+    let first_quote = rest.find('"')?;
+    let rest = &rest[first_quote + 1..];
+    let second_quote = rest.find('"')?;
+    Some(rest[..second_quote].to_string())
+}
+
+fn first_file_id_after(text: &str, key: &str) -> Option<i64> {
+    let pos = text.find(key)?;
+    let rest = &text[pos..];
+    let marker = "m_PathID = ";
+    let id_pos = rest.find(marker)?;
+    let rest = &rest[id_pos + marker.len()..];
+    parse_i64_prefix(rest)
+}
+
+fn file_ids_after(text: &str, key: &str) -> Vec<i64> {
+    let Some(pos) = text.find(key) else {
+        return Vec::new();
+    };
+    let rest = &text[pos..];
+    let end = rest.find("\n  ").unwrap_or(rest.len());
+    let section = &rest[..end];
+    let marker = "m_PathID = ";
+    let mut ids = Vec::new();
+    let mut cursor = 0;
+    while let Some(rel) = section[cursor..].find(marker) {
+        cursor += rel + marker.len();
+        if let Some(id) = parse_i64_prefix(&section[cursor..]) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+fn vec3_after(text: &str, key: &str) -> Option<Vec3> {
+    let pos = text.find(key)?;
+    let rest = &text[pos..];
+    let mut x = None;
+    let mut y = None;
+    let mut z = None;
+    for line in rest.lines().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.starts_with("x = ") {
+            x = parse_f64_prefix(trimmed.trim_start_matches("x = "));
+        } else if trimmed.starts_with("y = ") {
+            y = parse_f64_prefix(trimmed.trim_start_matches("y = "));
+        } else if trimmed.starts_with("z = ") {
+            z = parse_f64_prefix(trimmed.trim_start_matches("z = "));
+        } else if x.is_some() || y.is_some() || z.is_some() {
+            break;
+        }
+        if x.is_some() && y.is_some() && z.is_some() {
+            break;
+        }
+    }
+    Some(Vec3 {
+        x: x?,
+        y: y?,
+        z: z?,
+    })
+}
+
+fn parse_i64_prefix(text: &str) -> Option<i64> {
+    let mut end = 0;
+    for (idx, ch) in text.char_indices() {
+        if idx == 0 && ch == '-' {
+            end = ch.len_utf8();
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    text[..end].parse().ok()
+}
+
+fn parse_f64_prefix(text: &str) -> Option<f64> {
+    let mut end = 0;
+    for (idx, ch) in text.char_indices() {
+        if ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | 'e' | 'E') {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    text[..end].parse().ok()
 }
 
 fn copy_voice_files(stem: &str, output_dir: &Path, data_dir: &Path) -> anyhow::Result<usize> {
@@ -562,12 +973,14 @@ fn copy_voice_files(stem: &str, output_dir: &Path, data_dir: &Path) -> anyhow::R
 
 fn build_config(
     stem: &str,
+    source_hash: String,
     hi_id: Option<i64>,
     meta: &HomeIllustMeta,
     leader_skin: &Option<serde_json::Value>,
     skeleton_anim: &Option<serde_json::Value>,
     transform: &Option<serde_json::Value>,
     skeleton_data: Option<&serde_json::Value>,
+    prefab_transforms: PrefabTransforms,
     bg_textures: &[String],
     has_effects: bool,
 ) -> IllustConfig {
@@ -646,6 +1059,13 @@ fn build_config(
         .unwrap_or(0)
         != 0;
 
+    let skeleton_scale = skeleton_data
+        .and_then(|v| v.get("scale"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.01);
+
+    let home_position = hi_id.and_then(|id| meta.home_positions.get(&id).copied());
+
     let mut aspect_layouts = HashMap::new();
     if let Some(t) = transform {
         if let Some(defines) = t.get("_aspectDefines").and_then(|v| v.as_array()) {
@@ -677,6 +1097,7 @@ fn build_config(
 
     IllustConfig {
         id: stem.to_string(),
+        source_hash,
         character_name,
         character_names,
         illust_type,
@@ -690,6 +1111,9 @@ fn build_config(
         physics_position_factor: phys_pos,
         physics_rotation_factor: phys_rot,
         has_screen_blend,
+        skeleton_scale,
+        home_position,
+        prefab_transforms,
         aspect_layouts,
         bg_textures: bg_textures.to_vec(),
         has_effects,
