@@ -71,6 +71,9 @@ enum Command {
         /// 同时复制语音文件（需先运行 wbu audio card）
         #[arg(long)]
         voices: bool,
+        /// 额外导出 Unity 布局诊断数据，用于校准 Web 展示窗口
+        #[arg(long)]
+        layout_debug: bool,
         /// AssetStudio CLI 路径（覆盖配置文件）
         #[arg(long)]
         asset_studio: Option<String>,
@@ -541,7 +544,7 @@ async fn main() -> anyhow::Result<()> {
 
         },
 
-        Command::HomeIllust { asset_studio, voices } => {
+        Command::HomeIllust { asset_studio, voices, layout_debug } => {
             let cfg = config::load()?;
             let as_path = match &asset_studio {
                 Some(p) => std::path::PathBuf::from(p),
@@ -549,7 +552,7 @@ async fn main() -> anyhow::Result<()> {
             };
             let data_dir = std::path::Path::new(&cfg.data_dir);
             let vgmstream_path = std::path::Path::new(&cfg.vgmstream_path);
-            let stats = texture::home_illust::process_home_illustrations(data_dir, &as_path, vgmstream_path, voices)?;
+            let stats = texture::home_illust::process_home_illustrations(data_dir, &as_path, vgmstream_path, voices, layout_debug)?;
             println!("HomeIllustration 提取完成: {} | 跳过: {} | 失败: {}",
                 stats.processed, stats.skipped, stats.failed);
         }

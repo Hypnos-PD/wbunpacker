@@ -24,7 +24,7 @@
 //!     ...
 //! ```
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -89,6 +89,40 @@ struct PrefabTransforms {
     nodes: BTreeMap<String, PrefabTransformNode>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct LayoutDebugTransform {
+    key: String,
+    name: String,
+    path_id: i64,
+    parent_path_id: i64,
+    local_position: Vec3,
+    local_scale: Vec3,
+    world_position: Vec3,
+    world_scale: Vec3,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LayoutDebugAspectDefine {
+    label: String,
+    aspect: f64,
+    local_position: HomePosition,
+    local_scale: HomePosition,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LayoutDebug {
+    version: u32,
+    notes: Vec<String>,
+    skeleton_scale: f64,
+    home_position: Option<HomePosition>,
+    aspect_defines: Vec<LayoutDebugAspectDefine>,
+    root_chain: Vec<LayoutDebugTransform>,
+    spine_chain: Vec<LayoutDebugTransform>,
+    background_chain: Vec<LayoutDebugTransform>,
+    background_quad_world_scale: Option<Vec3>,
+    prefab_scale: f64,
+}
+
 /// 从主数据预加载的映射表（仅用于角色名查找）
 struct HomeIllustMeta {
     /// leader_skin_id → 角色名（日文，来自 LeaderSkinMaster）
@@ -132,6 +166,8 @@ struct IllustConfig {
     home_position: Option<HomePosition>,
     prefab_transforms: PrefabTransforms,
     aspect_layouts: HashMap<String, AspectLayout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout_debug: Option<LayoutDebug>,
     bg_textures: Vec<String>,
     has_effects: bool,
 }
@@ -140,6 +176,7 @@ struct IllustConfig {
 struct ExtractCtx<'a> {
     meta: &'a HomeIllustMeta,
     asset_studio_path: &'a Path,
+    layout_debug: bool,
 }
 
 // ============================================================================
@@ -152,6 +189,7 @@ pub fn process_home_illustrations(
     asset_studio_path: &Path,
     vgmstream_path: &Path,
     copy_voices: bool,
+    layout_debug: bool,
 ) -> anyhow::Result<HomeIllustStats> {
     // 0. 预加载主数据映射
     let meta = load_master_data(data_dir)?;
@@ -204,6 +242,7 @@ pub fn process_home_illustrations(
     let ctx = ExtractCtx {
         meta: &meta,
         asset_studio_path,
+        layout_debug,
     };
 
     let mut stats = HomeIllustStats::default();
@@ -219,6 +258,7 @@ pub fn process_home_illustrations(
         // 增量跳过：只有源 AssetBundle hash 未变化时才跳过。
         if output_dir.join("config.json").exists()
             && config_source_hash(&output_dir.join("config.json")).as_deref() == Some(&source_hash)
+            && (!layout_debug || config_has_layout_debug(&output_dir.join("config.json")))
         {
             stats.skipped += 1;
             pb.inc(1);
@@ -304,11 +344,17 @@ fn load_master_data(data_dir: &Path) -> anyhow::Result<HomeIllustMeta> {
     let mut text_labels: HashMap<String, HashMap<String, String>> = HashMap::new();
     for variant in &["Chs", "Cht", "Eng", "Jpn", "Kor"] {
         let vkey = match *variant {
-            "Chs" => "chs", "Cht" => "cht", "Eng" => "eng",
-            "Jpn" => "jpn", "Kor" => "kor", _ => continue,
+            "Chs" => "chs",
+            "Cht" => "cht",
+            "Eng" => "eng",
+            "Jpn" => "jpn",
+            "Kor" => "kor",
+            _ => continue,
         };
         let mtl_path = master_root.join(variant).join("MasterTextLabel.json");
-        if !mtl_path.exists() { continue; }
+        if !mtl_path.exists() {
+            continue;
+        }
         let raw: Vec<serde_json::Value> = serde_json::from_str(
             &fs::read_to_string(&mtl_path)
                 .with_context(|| format!("无法读取 {}", mtl_path.display()))?,
@@ -365,14 +411,17 @@ fn is_battle_background(hi_id: i64) -> bool {
 /// 战斗背景 hi_id → leader_skin_id 映射
 fn battle_to_leader_id(hi_id: i64) -> Option<i64> {
     match hi_id {
-        2001..=2008 => Some(hi_id - 900),  // 200x → 110x
-        2101..=2108 => Some(hi_id - 900),  // 210x → 120x
+        2001..=2008 => Some(hi_id - 900), // 200x → 110x
+        2101..=2108 => Some(hi_id - 900), // 210x → 120x
         _ => None,
     }
 }
 
 /// 从主数据查找角色名（日文）和各语言本地化名
-fn lookup_character_names(meta: &HomeIllustMeta, hi_id: i64) -> (Option<String>, HashMap<String, String>) {
+fn lookup_character_names(
+    meta: &HomeIllustMeta,
+    hi_id: i64,
+) -> (Option<String>, HashMap<String, String>) {
     let jp_name = meta.leader_names.get(&hi_id).cloned();
     let mut names = HashMap::new();
 
@@ -516,6 +565,19 @@ fn extract_one(
         &transform_adjuster,
         skeleton_data.as_ref(),
         prefab_transforms,
+        if ctx.layout_debug {
+            let skeleton_scale = skeleton_scale_from_data(skeleton_data.as_ref());
+            let home_position = hi_id.and_then(|id| ctx.meta.home_positions.get(&id).copied());
+            Some(build_layout_debug(
+                &stem,
+                &all_files,
+                &transform_adjuster,
+                skeleton_scale,
+                home_position,
+            ))
+        } else {
+            None
+        },
         &bg_pngs,
         has_effects,
     );
@@ -549,12 +611,18 @@ fn run_asset_studio_single(
     let status = Command::new(asset_studio_path)
         .arg(ab_path)
         .args([
-            "-t", "all",
-            "-g", "fileName",
-            "-f", "assetName",
-            "-o", &output_dir.to_string_lossy(),
-            "--unity-version", UNITY_VERSION,
-            "--log-level", "warning",
+            "-t",
+            "all",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName",
+            "-o",
+            &output_dir.to_string_lossy(),
+            "--unity-version",
+            UNITY_VERSION,
+            "--log-level",
+            "warning",
         ])
         .status()
         .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
@@ -635,6 +703,18 @@ fn config_source_hash(path: &Path) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn config_has_layout_debug(path: &Path) -> bool {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => return false,
+    };
+    let value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    value.get("layout_debug").is_some()
+}
+
 #[derive(Debug, Default)]
 struct DumpGameObject {
     name: String,
@@ -650,7 +730,13 @@ struct DumpTransform {
     local_scale: Vec3,
 }
 
-fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
+#[derive(Debug, Default)]
+struct DumpScene {
+    game_objects: HashMap<i64, DumpGameObject>,
+    transforms: HashMap<i64, DumpTransform>,
+}
+
+fn parse_dump_scene(files: &[PathBuf]) -> DumpScene {
     let mut game_objects: HashMap<i64, DumpGameObject> = HashMap::new();
     let mut transforms: HashMap<i64, DumpTransform> = HashMap::new();
 
@@ -693,6 +779,17 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
         }
     }
 
+    DumpScene {
+        game_objects,
+        transforms,
+    }
+}
+
+fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
+    let scene = parse_dump_scene(files);
+    let game_objects = &scene.game_objects;
+    let transforms = &scene.transforms;
+
     let mut nodes = BTreeMap::new();
     let root_transform = game_objects
         .values()
@@ -709,7 +806,13 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
     let bg_transform = transform_by_go_name(&game_objects, &format!("bg_{stem}"))
         .or_else(|| transform_by_go_name(&game_objects, "BG"));
 
-    add_transform_node("root", root_transform, &game_objects, &transforms, &mut nodes);
+    add_transform_node(
+        "root",
+        root_transform,
+        &game_objects,
+        &transforms,
+        &mut nodes,
+    );
     add_transform_node(
         "character",
         character_transform,
@@ -731,7 +834,13 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
         &transforms,
         &mut nodes,
     );
-    add_transform_node("background", bg_transform, &game_objects, &transforms, &mut nodes);
+    add_transform_node(
+        "background",
+        bg_transform,
+        &game_objects,
+        &transforms,
+        &mut nodes,
+    );
     if let Some(bg) = bg_transform.and_then(|id| transforms.get(&id)) {
         if let Some(child_id) = bg.children.first().copied() {
             add_transform_node(
@@ -755,13 +864,20 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
     }
 }
 
-fn transform_by_go_name(
-    game_objects: &HashMap<i64, DumpGameObject>,
-    name: &str,
-) -> Option<i64> {
+fn transform_by_go_name(game_objects: &HashMap<i64, DumpGameObject>, name: &str) -> Option<i64> {
     game_objects
         .values()
         .find(|go| go.name == name)
+        .map(|go| go.transform_id)
+}
+
+fn transform_by_go_prefix(
+    game_objects: &HashMap<i64, DumpGameObject>,
+    prefix: &str,
+) -> Option<i64> {
+    game_objects
+        .values()
+        .find(|go| go.name.starts_with(prefix))
         .map(|go| go.transform_id)
 }
 
@@ -807,6 +923,157 @@ fn world_position(id: i64, transforms: &HashMap<i64, DumpTransform>) -> Vec3 {
         x: parent_pos.x + t.local_position.x * parent_scale.x,
         y: parent_pos.y + t.local_position.y * parent_scale.y,
         z: parent_pos.z + t.local_position.z * parent_scale.z,
+    }
+}
+
+fn build_layout_debug(
+    stem: &str,
+    files: &[PathBuf],
+    transform_adjuster: &Option<serde_json::Value>,
+    skeleton_scale: f64,
+    home_position: Option<HomePosition>,
+) -> LayoutDebug {
+    let scene = parse_dump_scene(files);
+    let game_objects = &scene.game_objects;
+    let transforms = &scene.transforms;
+    let root_transform = transform_by_go_name(game_objects, stem);
+    let character_transform = transform_by_go_name(game_objects, "Character");
+    let spine_root_transform = transform_by_go_name(game_objects, &format!("spine_{stem}"));
+    let spine_object_transform = transform_by_go_prefix(game_objects, "Spine GameObject")
+        .filter(|id| Some(*id) != root_transform)
+        .or(spine_root_transform);
+    let bg_transform = transform_by_go_name(game_objects, &format!("bg_{stem}"))
+        .or_else(|| transform_by_go_name(game_objects, "BG"));
+    let background_quad_transform = bg_transform
+        .and_then(|id| transforms.get(&id))
+        .and_then(|t| t.children.first().copied());
+
+    let mut root_chain = Vec::new();
+    if let Some(id) = root_transform {
+        push_layout_node("root", id, game_objects, transforms, &mut root_chain);
+    }
+
+    let mut spine_chain = Vec::new();
+    for (key, id) in [
+        ("root", root_transform),
+        ("character", character_transform),
+        ("spineRoot", spine_root_transform),
+        ("spineObject", spine_object_transform),
+    ] {
+        if let Some(id) = id {
+            push_layout_node(key, id, game_objects, transforms, &mut spine_chain);
+        }
+    }
+
+    let mut background_chain = Vec::new();
+    for (key, id) in [
+        ("root", root_transform),
+        ("background", bg_transform),
+        ("backgroundQuad", background_quad_transform),
+    ] {
+        if let Some(id) = id {
+            push_layout_node(key, id, game_objects, transforms, &mut background_chain);
+        }
+    }
+
+    let background_quad_world_scale =
+        background_quad_transform.map(|id| world_scale(id, transforms));
+    let prefab_scale = spine_object_transform
+        .map(|id| world_scale(id, transforms).x)
+        .or_else(|| spine_root_transform.map(|id| world_scale(id, transforms).x))
+        .unwrap_or(1.0);
+
+    LayoutDebug {
+        version: 1,
+        notes: vec![
+            "Dumped from Unity Transform and HomeIllustTransformAdjuster data.".to_string(),
+            "HomeIllustrationMaster position is preserved as source pixels; web conversion must be derived from the actual game window/camera.".to_string(),
+            "backgroundQuad is the in-prefab background mesh transform and can be used to infer visible world extents.".to_string(),
+        ],
+        skeleton_scale,
+        home_position,
+        aspect_defines: parse_aspect_defines(transform_adjuster),
+        root_chain,
+        spine_chain,
+        background_chain,
+        background_quad_world_scale,
+        prefab_scale,
+    }
+}
+
+fn push_layout_node(
+    key: &str,
+    transform_id: i64,
+    game_objects: &HashMap<i64, DumpGameObject>,
+    transforms: &HashMap<i64, DumpTransform>,
+    out: &mut Vec<LayoutDebugTransform>,
+) {
+    let Some(transform) = transforms.get(&transform_id) else {
+        return;
+    };
+    let name = game_objects
+        .get(&transform.game_object_id)
+        .map(|go| go.name.clone())
+        .unwrap_or_else(|| key.to_string());
+    out.push(LayoutDebugTransform {
+        key: key.to_string(),
+        name,
+        path_id: transform_id,
+        parent_path_id: transform.father_id,
+        local_position: transform.local_position,
+        local_scale: transform.local_scale,
+        world_position: world_position(transform_id, transforms),
+        world_scale: world_scale(transform_id, transforms),
+    });
+}
+
+fn parse_aspect_defines(
+    transform_adjuster: &Option<serde_json::Value>,
+) -> Vec<LayoutDebugAspectDefine> {
+    let mut result = Vec::new();
+    let Some(defines) = transform_adjuster
+        .as_ref()
+        .and_then(|v| v.get("_aspectDefines"))
+        .and_then(|v| v.as_array())
+    else {
+        return result;
+    };
+    for def in defines {
+        let aspect = def.get("_aspect").and_then(|v| v.as_f64()).unwrap_or(1.78);
+        let pos = def
+            .get("_localPosition")
+            .unwrap_or(&serde_json::Value::Null);
+        let scale = def.get("_localScale").unwrap_or(&serde_json::Value::Null);
+        result.push(LayoutDebugAspectDefine {
+            label: aspect_label(aspect).to_string(),
+            aspect,
+            local_position: HomePosition {
+                x: pos.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                y: pos.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            },
+            local_scale: HomePosition {
+                x: scale.get("x").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                y: scale.get("y").and_then(|v| v.as_f64()).unwrap_or(1.0),
+            },
+        });
+    }
+    result.sort_by(|a, b| {
+        a.aspect
+            .partial_cmp(&b.aspect)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    result
+}
+
+fn aspect_label(aspect: f64) -> &'static str {
+    if (aspect - 1.33).abs() < 0.01 {
+        "4:3"
+    } else if (aspect - 1.78).abs() < 0.02 {
+        "16:9"
+    } else if (aspect - 2.17).abs() < 0.01 {
+        "21:9"
+    } else {
+        "21:10"
     }
 }
 
@@ -971,7 +1238,11 @@ fn copy_voice_files(
         }
     }
 
-    let needed = (1..=4).any(|n| !lang_dir.join(format!("Play_dx_home_{hi_id}_{n}.wav")).exists());
+    let needed = (1..=4).any(|n| {
+        !lang_dir
+            .join(format!("Play_dx_home_{hi_id}_{n}.wav"))
+            .exists()
+    });
     if needed {
         total += extract_home_voice_pck(hi_id, data_dir, &lang_dir, vgmstream_path)?;
     }
@@ -1034,6 +1305,7 @@ fn build_config(
     transform: &Option<serde_json::Value>,
     skeleton_data: Option<&serde_json::Value>,
     prefab_transforms: PrefabTransforms,
+    layout_debug: Option<LayoutDebug>,
     bg_textures: &[String],
     has_effects: bool,
 ) -> IllustConfig {
@@ -1046,7 +1318,9 @@ fn build_config(
             let (jp_name, names) = lookup_character_names(meta, id);
             let primary_name = jp_name.or_else(|| names.get("jpn").cloned());
             let vp = Some(format!("dx_home_{id}"));
-            let vf = (1..=4).map(|n| format!("Play_dx_home_{id}_{n}.wav")).collect();
+            let vf = (1..=4)
+                .map(|n| format!("Play_dx_home_{id}_{n}.wav"))
+                .collect();
             ("home".to_string(), primary_name, names, vp, vf)
         }
         None => ("home".to_string(), None, HashMap::new(), None, vec![]),
@@ -1091,12 +1365,7 @@ fn build_config(
     let phys_pos = skeleton_anim
         .as_ref()
         .and_then(|v| v.get("physicsPositionInheritanceFactor"))
-        .and_then(|v| {
-            Some([
-                v.get("x")?.as_f64()? as f32,
-                v.get("y")?.as_f64()? as f32,
-            ])
-        })
+        .and_then(|v| Some([v.get("x")?.as_f64()? as f32, v.get("y")?.as_f64()? as f32]))
         .unwrap_or([1.0, 1.0]);
 
     let phys_rot = skeleton_anim
@@ -1112,10 +1381,7 @@ fn build_config(
         .unwrap_or(0)
         != 0;
 
-    let skeleton_scale = skeleton_data
-        .and_then(|v| v.get("scale"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.01);
+    let skeleton_scale = skeleton_scale_from_data(skeleton_data);
 
     let home_position = hi_id.and_then(|id| meta.home_positions.get(&id).copied());
 
@@ -1126,15 +1392,7 @@ fn build_config(
                 let aspect = def.get("_aspect").and_then(|v| v.as_f64()).unwrap_or(1.78);
                 let pos = def.get("_localPosition").unwrap();
                 let scale = def.get("_localScale").unwrap();
-                let label = if (aspect - 1.33).abs() < 0.01 {
-                    "4:3"
-                } else if (aspect - 1.78).abs() < 0.02 {
-                    "16:9"
-                } else if (aspect - 2.17).abs() < 0.01 {
-                    "21:9"
-                } else {
-                    "21:10"
-                };
+                let label = aspect_label(aspect);
                 aspect_layouts.insert(
                     label.to_string(),
                     AspectLayout {
@@ -1168,7 +1426,15 @@ fn build_config(
         home_position,
         prefab_transforms,
         aspect_layouts,
+        layout_debug,
         bg_textures: bg_textures.to_vec(),
         has_effects,
     }
+}
+
+fn skeleton_scale_from_data(skeleton_data: Option<&serde_json::Value>) -> f64 {
+    skeleton_data
+        .and_then(|v| v.get("scale"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.01)
 }
