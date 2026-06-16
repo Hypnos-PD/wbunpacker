@@ -548,7 +548,8 @@ async fn main() -> anyhow::Result<()> {
                 None => std::path::PathBuf::from(&cfg.asset_studio_path),
             };
             let data_dir = std::path::Path::new(&cfg.data_dir);
-            let stats = texture::home_illust::process_home_illustrations(data_dir, &as_path, voices)?;
+            let vgmstream_path = std::path::Path::new(&cfg.vgmstream_path);
+            let stats = texture::home_illust::process_home_illustrations(data_dir, &as_path, vgmstream_path, voices)?;
             println!("HomeIllustration 提取完成: {} | 跳过: {} | 失败: {}",
                 stats.processed, stats.skipped, stats.failed);
         }

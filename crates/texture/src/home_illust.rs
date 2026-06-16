@@ -150,6 +150,7 @@ struct ExtractCtx<'a> {
 pub fn process_home_illustrations(
     data_dir: &Path,
     asset_studio_path: &Path,
+    vgmstream_path: &Path,
     copy_voices: bool,
 ) -> anyhow::Result<HomeIllustStats> {
     // 0. 预加载主数据映射
@@ -243,7 +244,7 @@ pub fn process_home_illustrations(
         for ab_path in &ab_files {
             let stem = ab_path.file_stem().unwrap().to_string_lossy().to_string();
             let output_dir = output_root.join(&stem);
-            if copy_voice_files(&stem, &output_dir, data_dir).unwrap_or(0) > 0 {
+            if copy_voice_files(&stem, &output_dir, data_dir, vgmstream_path).unwrap_or(0) > 0 {
                 voice_copied += 1;
             }
         }
@@ -932,41 +933,87 @@ fn parse_f64_prefix(text: &str) -> Option<f64> {
     text[..end].parse().ok()
 }
 
-fn copy_voice_files(stem: &str, output_dir: &Path, data_dir: &Path) -> anyhow::Result<usize> {
+fn copy_voice_files(
+    stem: &str,
+    output_dir: &Path,
+    data_dir: &Path,
+    vgmstream_path: &Path,
+) -> anyhow::Result<usize> {
     let hi_id = match parse_hi_id(stem) {
         Some(id) => id,
         None => return Ok(0),
     };
 
     let voice_root = output_dir.join("voice");
-    if voice_root.exists() {
-        return Ok(0);
-    }
-
     let prefix = format!("Play_dx_home_{}_", hi_id);
     let mut total = 0;
 
-    for lang in &["jpn", "eng"] {
-        let audio_dir = data_dir.join("exports").join("audio").join(lang);
-        if !audio_dir.exists() {
-            continue;
-        }
-        let lang_dir = voice_root.join(lang);
-        let mut count = 0;
+    let audio_dir = data_dir.join("exports").join("audio").join("jpn");
+    let lang_dir = voice_root.join("jpn");
+    if audio_dir.exists() {
         for entry in fs::read_dir(&audio_dir)? {
             let entry = entry?;
             let name_str = entry.file_name().to_string_lossy().to_string();
             if name_str.starts_with(&prefix) && name_str.ends_with(".wav") {
                 fs::create_dir_all(&lang_dir)?;
-                fs::copy(entry.path(), lang_dir.join(&name_str))?;
-                count += 1;
+                let dest = lang_dir.join(&name_str);
+                if !dest.exists() {
+                    fs::copy(entry.path(), &dest)?;
+                    total += 1;
+                }
             }
         }
-        total += count;
     }
 
-    if total == 0 {
+    let needed = (1..=4).any(|n| !lang_dir.join(format!("Play_dx_home_{hi_id}_{n}.wav")).exists());
+    if needed {
+        total += extract_home_voice_pck(hi_id, data_dir, &lang_dir, vgmstream_path)?;
+    }
+
+    if !voice_root.join("jpn").exists() {
         let _ = fs::remove_dir(&voice_root);
+    }
+    Ok(total)
+}
+
+fn extract_home_voice_pck(
+    hi_id: i64,
+    data_dir: &Path,
+    output_dir: &Path,
+    vgmstream_path: &Path,
+) -> anyhow::Result<usize> {
+    let pck_path = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("raw-assets")
+        .join("sound")
+        .join("Windows")
+        .join("d")
+        .join("Japanese(JP)")
+        .join(format!("dx_home_{hi_id}.pck"));
+    if !pck_path.exists() {
+        return Ok(0);
+    }
+
+    let data = fs::read(&pck_path).with_context(|| format!("无法读取 {}", pck_path.display()))?;
+    let mut entries: Vec<(u32, u32)> = audio::parse_akpk(&data).into_iter().collect();
+    entries.sort_by_key(|(_, offset)| *offset);
+    if entries.is_empty() {
+        return Ok(0);
+    }
+
+    fs::create_dir_all(output_dir)?;
+    let mut total = 0;
+    for (idx, (_wem_id, offset)) in entries.iter().enumerate() {
+        let out_path = output_dir.join(format!("Play_dx_home_{hi_id}_{}.wav", idx + 1));
+        if out_path.exists() {
+            continue;
+        }
+        let Some(wem_data) = audio::extract_wem(&data, *offset) else {
+            continue;
+        };
+        audio::wem_to_wav(wem_data, &out_path, vgmstream_path)?;
+        total += 1;
     }
     Ok(total)
 }
