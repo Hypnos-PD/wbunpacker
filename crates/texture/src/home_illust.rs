@@ -338,8 +338,8 @@ fn load_master_data(data_dir: &Path) -> anyhow::Result<HomeIllustMeta> {
             let Some(id) = row.get(0).and_then(|v| v.as_i64()) else {
                 continue;
             };
-            let x = row.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let y = row.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let x = row.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y = row.get(3).and_then(|v| v.as_f64()).unwrap_or(0.0);
             home_positions.insert(id, HomePosition { x, y });
         }
     }
