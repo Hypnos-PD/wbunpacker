@@ -1,0 +1,697 @@
+//! HomeIllustration Spine 动画提取模块
+//!
+//! 从 `Prefabs/UI/HomeIllustration/hi_*.ab` 中提取 Spine 动画资源，
+//! 并生成可直接用于 Web/Godot 的清理目录。
+//!
+//! # 输出结构
+//!
+//! ```text
+//! exports/home-illustration/
+//!   hi_1001/
+//!     spine_hi_1001.skel
+//!     spine_hi_1001.atlas
+//!     spine_hi_1001.png
+//!     bg_hi_1001.png
+//!     config.json            ← 交互参数 + 角色名 + 语音引用
+//!     fx/                    ← 特效贴图（可选）
+//!       ef_dust001.png
+//!       ...
+//!     voice/                 ← 语音文件（可选，需先运行 wbu audio 提取）
+//!       Play_dx_home_1001_1.wav
+//!       Play_dx_home_1001_2.wav
+//!       ...
+//!   hi_1002/
+//!     ...
+//! ```
+
+use anyhow::{bail, Context};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+// ============================================================================
+// 常量
+// ============================================================================
+
+const UNITY_VERSION: &str = "2022.3.62f2";
+const HOME_ILLUST_DIR: &str = "Prefabs/UI/HomeIllustration";
+
+/// 需要跳过的非插画资源
+const SKIP_NAMES: &[&str] = &["HomeIllustBG", "UIHomeIllustMessageWindow"];
+
+// ============================================================================
+// 数据结构
+// ============================================================================
+
+#[derive(Debug, Default)]
+pub struct HomeIllustStats {
+    pub processed: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AspectLayout {
+    x: f64,
+    y: f64,
+    scale_x: f64,
+    scale_y: f64,
+}
+
+/// 从主数据预加载的映射表（仅用于角色名查找）
+struct HomeIllustMeta {
+    /// leader_skin_id → 角色名（日文，来自 LeaderSkinMaster）
+    leader_names: HashMap<i64, String>,
+    /// card_style_id → name_label（来自 CardText col 1）
+    card_name_labels: HashMap<i64, String>,
+    /// variant → (label → 本地化文本)
+    text_labels: HashMap<String, HashMap<String, String>>,
+}
+
+/// 最终输出的 config.json
+#[derive(Debug, serde::Serialize)]
+struct IllustConfig {
+    /// hi_ ID 字符串
+    id: String,
+    /// 角色名（日文/通用）
+    character_name: Option<String>,
+    /// 各语言本地化名 { "chs": "...", "eng": "...", ... }
+    character_names: HashMap<String, String>,
+    /// "home" | "battle"
+    illust_type: String,
+    /// Wwise voice_prefix（dx_home_{id}）
+    voice_prefix: Option<String>,
+    /// 推荐语音文件（相对于 voice/ 子目录）
+    voice_files: Vec<String>,
+    /// 默认循环动画名
+    idle_animation: String,
+    tap_animations: Vec<String>,
+    blend_times: Vec<f32>,
+    default_mix: f32,
+    #[serde(rename = "loop")]
+    r#loop: bool,
+    physics_position_factor: [f32; 2],
+    physics_rotation_factor: f32,
+    has_screen_blend: bool,
+    aspect_layouts: HashMap<String, AspectLayout>,
+    bg_textures: Vec<String>,
+    has_effects: bool,
+}
+
+/// 提取上下文
+struct ExtractCtx<'a> {
+    meta: &'a HomeIllustMeta,
+    data_dir: &'a Path,
+    asset_studio_path: &'a Path,
+    copy_voices: bool,
+}
+
+// ============================================================================
+// 公共 API
+// ============================================================================
+
+/// 批量提取 HomeIllustration Spine 动画
+pub fn process_home_illustrations(
+    data_dir: &Path,
+    asset_studio_path: &Path,
+    copy_voices: bool,
+) -> anyhow::Result<HomeIllustStats> {
+    // 0. 预加载主数据映射
+    let meta = load_master_data(data_dir)?;
+
+    let decrypted_dir = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("decrypted")
+        .join(HOME_ILLUST_DIR);
+
+    if !decrypted_dir.exists() {
+        bail!(
+            "HomeIllustration 目录不存在: {}（请先运行 wbu asset batch -v Chs）",
+            decrypted_dir.display()
+        );
+    }
+
+    let output_root = data_dir.join("exports").join("home-illustration");
+    fs::create_dir_all(&output_root)?;
+
+    // 收集所有 hi_*.ab 文件
+    let mut ab_files: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(&decrypted_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with(".ab") && name_str.starts_with("hi_") {
+            let stem = name_str.trim_end_matches(".ab").to_string();
+            if !SKIP_NAMES.contains(&stem.as_str()) {
+                ab_files.push(entry.path());
+            }
+        }
+    }
+    ab_files.sort();
+
+    if ab_files.is_empty() {
+        println!("没有找到 HomeIllustration hi_*.ab 文件");
+        return Ok(HomeIllustStats::default());
+    }
+
+    let pb = ProgressBar::new(ab_files.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} {msg}",
+        )
+        .unwrap()
+        .progress_chars("=> "),
+    );
+
+    let ctx = ExtractCtx {
+        meta: &meta,
+        data_dir,
+        asset_studio_path,
+        copy_voices,
+    };
+
+    let mut stats = HomeIllustStats::default();
+
+    for ab_path in &ab_files {
+        let stem = ab_path.file_stem().unwrap().to_string_lossy().to_string();
+        let output_dir = output_root.join(&stem);
+
+        pb.set_message(stem.clone());
+
+        // 增量跳过
+        if output_dir.join("config.json").exists() {
+            stats.skipped += 1;
+            pb.inc(1);
+            continue;
+        }
+
+        match extract_one(ab_path, &output_dir, &ctx) {
+            Ok(()) => stats.processed += 1,
+            Err(e) => {
+                tracing::error!("{stem}: {e}");
+                stats.failed += 1;
+                let _ = fs::remove_dir_all(&output_dir);
+            }
+        }
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+
+    // 后处理：复制语音
+    if copy_voices {
+        let mut voice_copied = 0usize;
+        for ab_path in &ab_files {
+            let stem = ab_path.file_stem().unwrap().to_string_lossy().to_string();
+            let output_dir = output_root.join(&stem);
+            if copy_voice_files(&stem, &output_dir, data_dir).unwrap_or(0) > 0 {
+                voice_copied += 1;
+            }
+        }
+        if voice_copied > 0 {
+            println!("语音文件已复制到 {} 个目录", voice_copied);
+        }
+    }
+
+    Ok(stats)
+}
+
+// ============================================================================
+// 主数据加载
+// ============================================================================
+
+/// 从导出的主数据 JSON 中加载角色名映射
+fn load_master_data(data_dir: &Path) -> anyhow::Result<HomeIllustMeta> {
+    let master_root = data_dir.join("exports").join("master-data");
+
+    // 1. LeaderSkinMaster → leader_skin_id → name (any variant, all have Japanese)
+    let mut leader_names = HashMap::new();
+    let ls_path = master_root.join("Chs").join("LeaderSkinMaster.json");
+    if ls_path.exists() {
+        let raw: Vec<serde_json::Value> = serde_json::from_str(
+            &fs::read_to_string(&ls_path)
+                .with_context(|| format!("无法读取 {}", ls_path.display()))?,
+        )?;
+        for row in &raw {
+            if let (Some(id), Some(name)) = (
+                row.get(0).and_then(|v| v.as_i64()),
+                row.get(1).and_then(|v| v.as_str()),
+            ) {
+                leader_names.insert(id, name.to_string());
+            }
+        }
+    }
+
+    // 2. CardText → card_style_id → name_label (same labels across all variants)
+    let mut card_name_labels = HashMap::new();
+    let ct_path = master_root.join("Chs").join("CardText.json");
+    if ct_path.exists() {
+        let raw: Vec<serde_json::Value> = serde_json::from_str(
+            &fs::read_to_string(&ct_path)
+                .with_context(|| format!("无法读取 {}", ct_path.display()))?,
+        )?;
+        for row in &raw {
+            if let (Some(style_id), Some(label)) = (
+                row.get(0).and_then(|v| v.as_i64()),
+                row.get(1).and_then(|v| v.as_str()),
+            ) {
+                card_name_labels.insert(style_id, label.to_string());
+            }
+        }
+    }
+
+    // 3. MasterTextLabel from all 5 variants
+    let mut text_labels: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for variant in &["Chs", "Cht", "Eng", "Jpn", "Kor"] {
+        let vkey = match *variant {
+            "Chs" => "chs", "Cht" => "cht", "Eng" => "eng",
+            "Jpn" => "jpn", "Kor" => "kor", _ => continue,
+        };
+        let mtl_path = master_root.join(variant).join("MasterTextLabel.json");
+        if !mtl_path.exists() { continue; }
+        let raw: Vec<serde_json::Value> = serde_json::from_str(
+            &fs::read_to_string(&mtl_path)
+                .with_context(|| format!("无法读取 {}", mtl_path.display()))?,
+        )?;
+        let mut map = HashMap::new();
+        for row in &raw {
+            if let (Some(label), Some(text)) = (
+                row.get(0).and_then(|v| v.as_str()),
+                row.get(1).and_then(|v| v.as_str()),
+            ) {
+                map.insert(label.to_string(), text.to_string());
+            }
+        }
+        text_labels.insert(vkey.to_string(), map);
+    }
+
+    Ok(HomeIllustMeta {
+        leader_names,
+        card_name_labels,
+        text_labels,
+    })
+}
+
+/// 解析 hi_ ID 为整数
+fn parse_hi_id(stem: &str) -> Option<i64> {
+    stem.strip_prefix("hi_")?.parse().ok()
+}
+
+/// 判断是否为战斗背景（2001-2108 范围）
+fn is_battle_background(hi_id: i64) -> bool {
+    (2001..=2108).contains(&hi_id)
+}
+
+/// 战斗背景 hi_id → leader_skin_id 映射
+fn battle_to_leader_id(hi_id: i64) -> Option<i64> {
+    match hi_id {
+        2001..=2008 => Some(hi_id - 900),  // 200x → 110x
+        2101..=2108 => Some(hi_id - 900),  // 210x → 120x
+        _ => None,
+    }
+}
+
+/// 从主数据查找角色名（日文）和各语言本地化名
+fn lookup_character_names(meta: &HomeIllustMeta, hi_id: i64) -> (Option<String>, HashMap<String, String>) {
+    let jp_name = meta.leader_names.get(&hi_id).cloned();
+    let mut names = HashMap::new();
+
+    // 1. CardText → MasterTextLabel（完整卡名，适用于长 ID）
+    if let Some(label) = meta.card_name_labels.get(&hi_id) {
+        for (variant, map) in &meta.text_labels {
+            if let Some(text) = map.get(label) {
+                names.insert(variant.clone(), text.clone());
+            }
+        }
+    }
+
+    // 2. HomeIllustrationName_{hi_id}（短名称，适用于所有 ID）
+    let home_label = format!("HomeIllustrationName_{hi_id}");
+    for (variant, map) in &meta.text_labels {
+        if let Some(text) = map.get(&home_label) {
+            names.entry(variant.clone()).or_insert_with(|| text.clone());
+        }
+    }
+
+    (jp_name, names)
+}
+
+// ============================================================================
+// 单文件提取
+// ============================================================================
+
+fn extract_one(ab_path: &Path, output_dir: &Path, ctx: &ExtractCtx) -> anyhow::Result<()> {
+    let stem = ab_path.file_stem().unwrap().to_string_lossy().to_string();
+
+    // 清理旧数据
+    if output_dir.exists() {
+        fs::remove_dir_all(output_dir)?;
+    }
+
+    // 临时目录
+    let temp_dir = output_dir.with_file_name(format!("_tmp_{}", stem));
+    if temp_dir.exists() {
+        fs::remove_dir_all(&temp_dir)?;
+    }
+    fs::create_dir_all(&temp_dir)?;
+
+    // 1. AssetStudio 导出全部资产
+    run_asset_studio_single(ab_path, &temp_dir, ctx.asset_studio_path)?;
+
+    // 2. 找到导出的子目录
+    let export_subdirs: Vec<PathBuf> = fs::read_dir(&temp_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+
+    if export_subdirs.is_empty() {
+        bail!("AssetStudio 未生成任何导出文件");
+    }
+
+    // 收集所有导出文件
+    let mut all_files = Vec::new();
+    for subdir in &export_subdirs {
+        let cab_dir = find_single_subdir(subdir)?;
+        collect_files(&cab_dir, &mut all_files);
+    }
+
+    // 3. 分类文件
+    fs::create_dir_all(output_dir)?;
+    let fx_dir = output_dir.join("fx");
+
+    let mut spine_skel: Option<PathBuf> = None;
+    let mut spine_atlas: Option<PathBuf> = None;
+    let mut spine_png: Option<PathBuf> = None;
+    let mut bg_pngs: Vec<String> = Vec::new();
+    let mut has_effects = false;
+
+    // Unity JSON 数据
+    let mut leader_skin_setting: Option<serde_json::Value> = None;
+    let mut skeleton_anim: Option<serde_json::Value> = None;
+    let mut transform_adjuster: Option<serde_json::Value> = None;
+    let mut skeleton_data: Option<serde_json::Value> = None;
+
+    for file in &all_files {
+        let name = file.file_name().unwrap().to_string_lossy().to_string();
+
+        if name.ends_with(".skel") && name.starts_with("spine_hi_") {
+            spine_skel = Some(file.clone());
+        } else if name.ends_with(".atlas") && name.starts_with("spine_hi_") {
+            spine_atlas = Some(file.clone());
+        } else if name.ends_with(".png") && name.starts_with("spine_hi_") {
+            spine_png = Some(file.clone());
+        } else if name.ends_with(".png") && name.starts_with("bg_hi_") {
+            bg_pngs.push(name.clone());
+            fs::copy(file, output_dir.join(&name))?;
+        } else if name.ends_with(".png") && name.starts_with("ef_") {
+            has_effects = true;
+            fs::create_dir_all(&fx_dir)?;
+            fs::copy(file, fx_dir.join(&name))?;
+        } else if name.ends_with(".png")
+            && (name.starts_with("sp_") || name.starts_with("tex_eff_"))
+        {
+            has_effects = true;
+            fs::create_dir_all(&fx_dir)?;
+            fs::copy(file, fx_dir.join(&name))?;
+        } else if name == "LeaderSkinSetting.json" {
+            leader_skin_setting = Some(serde_json::from_str(&fs::read_to_string(file)?)?);
+        } else if name == "SkeletonAnimation.json" {
+            skeleton_anim = Some(serde_json::from_str(&fs::read_to_string(file)?)?);
+        } else if name == "HomeIllustTransformAdjuster.json" {
+            transform_adjuster = Some(serde_json::from_str(&fs::read_to_string(file)?)?);
+        } else if name.ends_with("_SkeletonData.json") {
+            skeleton_data = Some(serde_json::from_str(&fs::read_to_string(file)?)?);
+        }
+    }
+
+    // 4. 复制核心 Spine 文件
+    if let Some(ref path) = spine_skel {
+        fs::copy(path, output_dir.join(path.file_name().unwrap()))?;
+    }
+    if let Some(ref path) = spine_atlas {
+        fs::copy(path, output_dir.join(path.file_name().unwrap()))?;
+    }
+    if let Some(ref path) = spine_png {
+        fs::copy(path, output_dir.join(path.file_name().unwrap()))?;
+    }
+
+    // 5. 生成 config.json
+    let hi_id = parse_hi_id(&stem);
+    let config = build_config(
+        &stem,
+        hi_id,
+        ctx.meta,
+        &leader_skin_setting,
+        &skeleton_anim,
+        &transform_adjuster,
+        skeleton_data.as_ref(),
+        &bg_pngs,
+        has_effects,
+    );
+
+    let config_json = serde_json::to_string_pretty(&config)?;
+    fs::write(output_dir.join("config.json"), config_json)?;
+
+    // 6. 清理临时目录
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    // 7. 如果 fx 目录为空，删除
+    if has_effects && fx_dir.exists() {
+        let count = fs::read_dir(&fx_dir)?.count();
+        if count == 0 {
+            let _ = fs::remove_dir(&fx_dir);
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// 辅助函数
+// ============================================================================
+
+fn run_asset_studio_single(
+    ab_path: &Path,
+    output_dir: &Path,
+    asset_studio_path: &Path,
+) -> anyhow::Result<()> {
+    let status = Command::new(asset_studio_path)
+        .arg(ab_path)
+        .args([
+            "-t", "all",
+            "-g", "fileName",
+            "-f", "assetName",
+            "-o", &output_dir.to_string_lossy(),
+            "--unity-version", UNITY_VERSION,
+            "--log-level", "warning",
+        ])
+        .status()
+        .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
+
+    if !status.success() {
+        bail!("AssetStudio 退出码: {:?}", status.code());
+    }
+    Ok(())
+}
+
+fn find_single_subdir(dir: &Path) -> anyhow::Result<PathBuf> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            return Ok(entry.path());
+        }
+    }
+    bail!("目录为空: {}", dir.display())
+}
+
+fn collect_files(dir: &Path, result: &mut Vec<PathBuf>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_files(&path, result);
+            } else {
+                result.push(path);
+            }
+        }
+    }
+}
+
+fn copy_voice_files(stem: &str, output_dir: &Path, data_dir: &Path) -> anyhow::Result<usize> {
+    let hi_id = match parse_hi_id(stem) {
+        Some(id) => id,
+        None => return Ok(0),
+    };
+
+    let voice_root = output_dir.join("voice");
+    if voice_root.exists() {
+        return Ok(0);
+    }
+
+    let prefix = format!("Play_dx_home_{}_", hi_id);
+    let mut total = 0;
+
+    for lang in &["jpn", "eng"] {
+        let audio_dir = data_dir.join("exports").join("audio").join(lang);
+        if !audio_dir.exists() {
+            continue;
+        }
+        let lang_dir = voice_root.join(lang);
+        let mut count = 0;
+        for entry in fs::read_dir(&audio_dir)? {
+            let entry = entry?;
+            let name_str = entry.file_name().to_string_lossy().to_string();
+            if name_str.starts_with(&prefix) && name_str.ends_with(".wav") {
+                fs::create_dir_all(&lang_dir)?;
+                fs::copy(entry.path(), lang_dir.join(&name_str))?;
+                count += 1;
+            }
+        }
+        total += count;
+    }
+
+    if total == 0 {
+        let _ = fs::remove_dir(&voice_root);
+    }
+    Ok(total)
+}
+
+fn build_config(
+    stem: &str,
+    hi_id: Option<i64>,
+    meta: &HomeIllustMeta,
+    leader_skin: &Option<serde_json::Value>,
+    skeleton_anim: &Option<serde_json::Value>,
+    transform: &Option<serde_json::Value>,
+    skeleton_data: Option<&serde_json::Value>,
+    bg_textures: &[String],
+    has_effects: bool,
+) -> IllustConfig {
+    let (illust_type, character_name, character_names, voice_prefix, voice_files) = match hi_id {
+        Some(id) if is_battle_background(id) => {
+            let (jp_name, names) = lookup_character_names(meta, id);
+            ("battle".to_string(), jp_name, names, None, vec![])
+        }
+        Some(id) => {
+            let (jp_name, names) = lookup_character_names(meta, id);
+            let primary_name = jp_name.or_else(|| names.get("jpn").cloned());
+            let vp = Some(format!("dx_home_{id}"));
+            let vf = (1..=4).map(|n| format!("Play_dx_home_{id}_{n}.wav")).collect();
+            ("home".to_string(), primary_name, names, vp, vf)
+        }
+        None => ("home".to_string(), None, HashMap::new(), None, vec![]),
+    };
+
+    let tap_animations: Vec<String> = leader_skin
+        .as_ref()
+        .and_then(|v| v.get("_homeEmoteList"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let blend_times: Vec<f32> = leader_skin
+        .as_ref()
+        .and_then(|v| v.get("BlendTimes"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![0.2]);
+
+    let default_mix = skeleton_anim
+        .as_ref()
+        .and_then(|v| v.get("defaultMix"))
+        .or_else(|| skeleton_data.and_then(|v| v.get("defaultMix")))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.2) as f32;
+
+    let loop_val = skeleton_anim
+        .as_ref()
+        .and_then(|v| v.get("loop"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1)
+        != 0;
+
+    let phys_pos = skeleton_anim
+        .as_ref()
+        .and_then(|v| v.get("physicsPositionInheritanceFactor"))
+        .and_then(|v| {
+            Some([
+                v.get("x")?.as_f64()? as f32,
+                v.get("y")?.as_f64()? as f32,
+            ])
+        })
+        .unwrap_or([1.0, 1.0]);
+
+    let phys_rot = skeleton_anim
+        .as_ref()
+        .and_then(|v| v.get("physicsRotationInheritanceFactor"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0) as f32;
+
+    let has_screen_blend = skeleton_data
+        .and_then(|v| v.get("blendModeMaterials"))
+        .and_then(|v| v.get("requiresBlendModeMaterials"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        != 0;
+
+    let mut aspect_layouts = HashMap::new();
+    if let Some(t) = transform {
+        if let Some(defines) = t.get("_aspectDefines").and_then(|v| v.as_array()) {
+            for def in defines {
+                let aspect = def.get("_aspect").and_then(|v| v.as_f64()).unwrap_or(1.78);
+                let pos = def.get("_localPosition").unwrap();
+                let scale = def.get("_localScale").unwrap();
+                let label = if (aspect - 1.33).abs() < 0.01 {
+                    "4:3"
+                } else if (aspect - 1.78).abs() < 0.02 {
+                    "16:9"
+                } else if (aspect - 2.17).abs() < 0.01 {
+                    "21:9"
+                } else {
+                    "21:10"
+                };
+                aspect_layouts.insert(
+                    label.to_string(),
+                    AspectLayout {
+                        x: pos.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        y: pos.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        scale_x: scale.get("x").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                        scale_y: scale.get("y").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                    },
+                );
+            }
+        }
+    }
+
+    IllustConfig {
+        id: stem.to_string(),
+        character_name,
+        character_names,
+        illust_type,
+        voice_prefix,
+        voice_files,
+        idle_animation: "idle".to_string(),
+        tap_animations,
+        blend_times,
+        default_mix,
+        r#loop: loop_val,
+        physics_position_factor: phys_pos,
+        physics_rotation_factor: phys_rot,
+        has_screen_blend,
+        aspect_layouts,
+        bg_textures: bg_textures.to_vec(),
+        has_effects,
+    }
+}

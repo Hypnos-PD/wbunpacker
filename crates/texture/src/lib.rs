@@ -1,4 +1,4 @@
-﻿//! 卡图纹理处理模块
+//! 卡图纹理处理模块
 //!
 //! # 管线
 //!
@@ -39,6 +39,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::debug;
+
+pub mod home_illust;
 
 // ============================================================================
 // 常量

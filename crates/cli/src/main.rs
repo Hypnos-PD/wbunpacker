@@ -66,6 +66,16 @@ enum Command {
         sub: TextureCmd,
     },
 
+    /// 提取 HomeIllustration Spine 动画 → Web/Godot 可用格式（skel/atlas/png + config.json）
+    HomeIllust {
+        /// 同时复制语音文件（需先运行 wbu audio card）
+        #[arg(long)]
+        voices: bool,
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+    },
+
     /// 渲染完整卡牌图（MVP: 卡图 + Card2D 边框 + 名称/cost/攻血）
     Render {
         #[command(subcommand)]
@@ -528,7 +538,21 @@ async fn main() -> anyhow::Result<()> {
                     texture::process_stamps(data_dir, &as_path, &v)?;
                 }
             }
+
         },
+
+        Command::HomeIllust { asset_studio, voices } => {
+            let cfg = config::load()?;
+            let as_path = match &asset_studio {
+                Some(p) => std::path::PathBuf::from(p),
+                None => std::path::PathBuf::from(&cfg.asset_studio_path),
+            };
+            let data_dir = std::path::Path::new(&cfg.data_dir);
+            let stats = texture::home_illust::process_home_illustrations(data_dir, &as_path, voices)?;
+            println!("HomeIllustration 提取完成: {} | 跳过: {} | 失败: {}",
+                stats.processed, stats.skipped, stats.failed);
+        }
+
         Command::Render { sub } => match sub {
             RenderCmd::Card { id, all, res, name, type_, cost, attack, life, class, rarity, variant, font, number_font } => {
                 let cfg = config::load()?;
