@@ -702,7 +702,7 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
     let spine_root_transform = transform_by_go_name(&game_objects, &format!("spine_{stem}"));
     let spine_object_transform = game_objects
         .values()
-        .filter(|go| go.name == stem)
+        .filter(|go| go.name.starts_with("Spine GameObject"))
         .map(|go| go.transform_id)
         .find(|id| Some(*id) != root_transform)
         .or(spine_root_transform);
@@ -831,7 +831,8 @@ fn world_scale(id: i64, transforms: &HashMap<i64, DumpTransform>) -> Vec3 {
 
 fn path_id_from_name(path: &Path) -> Option<i64> {
     let stem = path.file_stem()?.to_string_lossy();
-    stem.rsplit('_').next()?.parse().ok()
+    let (_, id) = stem.rsplit_once('@')?;
+    id.trim().parse().ok()
 }
 
 fn string_after(text: &str, key: &str) -> Option<String> {
