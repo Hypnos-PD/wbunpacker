@@ -38,7 +38,7 @@ use std::process::Command;
 
 const UNITY_VERSION: &str = "2022.3.62f2";
 const HOME_ILLUST_DIR: &str = "Prefabs/UI/HomeIllustration";
-const HOME_ILLUST_CONFIG_VERSION: u32 = 2;
+const HOME_ILLUST_CONFIG_VERSION: u32 = 3;
 
 /// 需要跳过的非插画资源
 const SKIP_NAMES: &[&str] = &["HomeIllustBG", "UIHomeIllustMessageWindow"];
@@ -514,12 +514,19 @@ fn extract_one(
 
     for file in &all_files {
         let name = file.file_name().unwrap().to_string_lossy().to_string();
+        let spine_prefix = format!("spine_{stem}");
 
-        if name.ends_with(".skel") && name.starts_with("spine_hi_") {
+        if name.ends_with(".skel")
+            && (name.starts_with(&spine_prefix) || name == format!("{stem}.skel"))
+        {
             spine_skel = Some(file.clone());
-        } else if name.ends_with(".atlas") && name.starts_with("spine_hi_") {
+        } else if name.ends_with(".atlas")
+            && (name.starts_with(&spine_prefix) || name == format!("{stem}.atlas"))
+        {
             spine_atlas = Some(file.clone());
-        } else if name.ends_with(".png") && name.starts_with("spine_hi_") {
+        } else if name.ends_with(".png")
+            && (name.starts_with(&spine_prefix) || name == format!("{stem}.png"))
+        {
             spine_png = Some(file.clone());
         } else if name.ends_with(".png") && name.starts_with("bg_hi_") {
             bg_pngs.push(name.clone());
@@ -547,13 +554,13 @@ fn extract_one(
 
     // 4. 复制核心 Spine 文件
     if let Some(ref path) = spine_skel {
-        fs::copy(path, output_dir.join(path.file_name().unwrap()))?;
+        fs::copy(path, output_dir.join(format!("spine_{stem}.skel")))?;
     }
     if let Some(ref path) = spine_atlas {
-        fs::copy(path, output_dir.join(path.file_name().unwrap()))?;
+        fs::copy(path, output_dir.join(format!("spine_{stem}.atlas")))?;
     }
     if let Some(ref path) = spine_png {
-        fs::copy(path, output_dir.join(path.file_name().unwrap()))?;
+        fs::copy(path, output_dir.join(format!("spine_{stem}.png")))?;
     }
 
     // 5. 生成 config.json
