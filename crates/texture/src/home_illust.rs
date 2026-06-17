@@ -38,6 +38,7 @@ use std::process::Command;
 
 const UNITY_VERSION: &str = "2022.3.62f2";
 const HOME_ILLUST_DIR: &str = "Prefabs/UI/HomeIllustration";
+const HOME_ILLUST_CONFIG_VERSION: u32 = 2;
 
 /// 需要跳过的非插画资源
 const SKIP_NAMES: &[&str] = &["HomeIllustBG", "UIHomeIllustMessageWindow"];
@@ -138,6 +139,7 @@ struct HomeIllustMeta {
 /// 最终输出的 config.json
 #[derive(Debug, serde::Serialize)]
 struct IllustConfig {
+    config_version: u32,
     /// hi_ ID 字符串
     id: String,
     /// 源 AssetBundle 的 SHA256，用于可更新增量导出。
@@ -258,6 +260,7 @@ pub fn process_home_illustrations(
         // 增量跳过：只有源 AssetBundle hash 未变化时才跳过。
         if output_dir.join("config.json").exists()
             && config_source_hash(&output_dir.join("config.json")).as_deref() == Some(&source_hash)
+            && config_version(&output_dir.join("config.json")) == Some(HOME_ILLUST_CONFIG_VERSION)
             && (!layout_debug || config_has_layout_debug(&output_dir.join("config.json")))
         {
             stats.skipped += 1;
@@ -701,6 +704,15 @@ fn config_source_hash(path: &Path) -> Option<String> {
         .get("source_hash")
         .and_then(|v| v.as_str())
         .map(ToString::to_string)
+}
+
+fn config_version(path: &Path) -> Option<u32> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("config_version")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
 }
 
 fn config_has_layout_debug(path: &Path) -> bool {
@@ -1407,6 +1419,7 @@ fn build_config(
     }
 
     IllustConfig {
+        config_version: HOME_ILLUST_CONFIG_VERSION,
         id: stem.to_string(),
         source_hash,
         character_name,
