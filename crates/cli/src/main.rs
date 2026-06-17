@@ -101,9 +101,25 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AssetCmd {
-    Download { name: String, #[arg(short, long, default_value = "Chs")] variant: String },
-    Decrypt { #[arg(short = 'f', long)] file: String, #[arg(short = 'n', long)] name: String, #[arg(short, long)] manifest: String },
-    Batch { #[arg(short, long, default_value = "Chs")] variant: String, #[arg(short = 'c', long, default_value = "8")] concurrency: usize },
+    Download {
+        name: String,
+        #[arg(short, long, default_value = "Chs")]
+        variant: String,
+    },
+    Decrypt {
+        #[arg(short = 'f', long)]
+        file: String,
+        #[arg(short = 'n', long)]
+        name: String,
+        #[arg(short, long)]
+        manifest: String,
+    },
+    Batch {
+        #[arg(short, long, default_value = "Chs")]
+        variant: String,
+        #[arg(short = 'c', long, default_value = "8")]
+        concurrency: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -143,6 +159,12 @@ enum TextureCmd {
     },
     /// 提取 Card2D 卡牌边框: UI/Card2D/frame2d_*.ab -> PNG
     CardFrames {
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+    },
+    /// 提取 Home Illustration 静态展示图: UI/Home/utx_pict_Illustration_*.ab -> PNG
+    HomeIllustPicts {
         /// AssetStudio CLI 路径（覆盖配置文件）
         #[arg(long)]
         asset_studio: Option<String>,
@@ -257,7 +279,11 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Manifest { version, variant, format } => {
+        Command::Manifest {
+            version,
+            variant,
+            format,
+        } => {
             let cfg = config::load()?;
             let version = version.unwrap_or(cfg.default_version);
 
@@ -287,42 +313,72 @@ async fn main() -> anyhow::Result<()> {
         Command::Version { .. } => todo!("version"),
 
         Command::Asset { sub } => match sub {
-            AssetCmd::Batch { variant, concurrency } => {
+            AssetCmd::Batch {
+                variant,
+                concurrency,
+            } => {
                 let cfg = config::load()?;
 
                 for v in expand_variants(&variant) {
-                    let manifest_path = format!("{}/manifests/json/assetbundle.{}.manifest.json", cfg.data_dir, v);
+                    let manifest_path = format!(
+                        "{}/manifests/json/assetbundle.{}.manifest.json",
+                        cfg.data_dir, v
+                    );
                     let json = std::fs::read_to_string(&manifest_path)
                         .with_context(|| format!("请先运行: wbu manifest -v {v} --format json"))?;
                     let m: manifest::Manifest = serde_json::from_str(&json)?;
 
                     let blobs_dir = std::path::Path::new(&cfg.data_dir).join("blobs");
-                    let variant_dir = std::path::Path::new(&cfg.data_dir).join("variants").join(&v);
+                    let variant_dir = std::path::Path::new(&cfg.data_dir)
+                        .join("variants")
+                        .join(&v);
 
                     let stats = asset::batch_download(
-                        &m, &cfg.asset_bundle_address, &cfg.asset_bundle_base_keys,
-                        concurrency, &blobs_dir, &variant_dir,
-                    ).await?;
+                        &m,
+                        &cfg.asset_bundle_address,
+                        &cfg.asset_bundle_base_keys,
+                        concurrency,
+                        &blobs_dir,
+                        &variant_dir,
+                    )
+                    .await?;
 
-                    println!("[{v}] 完成: {} | 跳过: {} | 失败: {} | 硬链接: {} | 下载: {:.1} MB",
-                        stats.done, stats.skipped, stats.failed, stats.hardlinks,
-                        stats.downloaded_bytes as f64 / 1024.0 / 1024.0);
+                    println!(
+                        "[{v}] 完成: {} | 跳过: {} | 失败: {} | 硬链接: {} | 下载: {:.1} MB",
+                        stats.done,
+                        stats.skipped,
+                        stats.failed,
+                        stats.hardlinks,
+                        stats.downloaded_bytes as f64 / 1024.0 / 1024.0
+                    );
                 }
             }
             AssetCmd::Download { name, variant } => {
                 let cfg = config::load()?;
-                let blobs_raw = std::path::Path::new(&cfg.data_dir).join("blobs").join("raw");
+                let blobs_raw = std::path::Path::new(&cfg.data_dir)
+                    .join("blobs")
+                    .join("raw");
 
                 for v in expand_variants(&variant) {
-                    let manifest_path = format!("{}/manifests/json/assetbundle.{}.manifest.json", cfg.data_dir, v);
+                    let manifest_path = format!(
+                        "{}/manifests/json/assetbundle.{}.manifest.json",
+                        cfg.data_dir, v
+                    );
                     let json = std::fs::read_to_string(&manifest_path)
                         .with_context(|| format!("请先运行: wbu manifest -v {v} --format json"))?;
                     let m: manifest::Manifest = serde_json::from_str(&json)?;
-                    let variant_links = std::path::Path::new(&cfg.data_dir).join("variants").join(&v);
+                    let variant_links = std::path::Path::new(&cfg.data_dir)
+                        .join("variants")
+                        .join(&v);
 
                     if let Some(asset) = m.assets.iter().find(|a| a.name == name) {
                         let blob_path = asset::blob_path(&blobs_raw, "", &asset.hash);
-                        let result = asset::download_asset(&asset.hash, &cfg.asset_bundle_address, &blob_path).await?;
+                        let result = asset::download_asset(
+                            &asset.hash,
+                            &cfg.asset_bundle_address,
+                            &blob_path,
+                        )
+                        .await?;
                         println!("[{v}] 下载: {} ({} bytes)", result.path, result.size);
                         let link_path = variant_links.join("raw").join(&asset.name);
                         if asset::hardlink_or_skip(&blob_path, &link_path)? {
@@ -330,7 +386,9 @@ async fn main() -> anyhow::Result<()> {
                         }
                     } else if let Some(raw) = m.raw_assets.iter().find(|r| r.name == name) {
                         let blob_path = asset::blob_path(&blobs_raw, "", &raw.hash);
-                        let result = asset::download_asset(&raw.hash, &cfg.asset_bundle_address, &blob_path).await?;
+                        let result =
+                            asset::download_asset(&raw.hash, &cfg.asset_bundle_address, &blob_path)
+                                .await?;
                         println!("[{v}] 下载: {} ({} bytes)", result.path, result.size);
                         let link_path = variant_links.join("raw-assets").join(&raw.name);
                         if asset::hardlink_or_skip(&blob_path, &link_path)? {
@@ -341,27 +399,48 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            AssetCmd::Decrypt { file, name, manifest } => {
+            AssetCmd::Decrypt {
+                file,
+                name,
+                manifest,
+            } => {
                 let cfg = config::load()?;
                 let json = std::fs::read_to_string(&manifest)?;
                 let m: manifest::Manifest = serde_json::from_str(&json)?;
-                let asset = m.assets.iter().find(|a| a.name == name)
+                let asset = m
+                    .assets
+                    .iter()
+                    .find(|a| a.name == name)
                     .ok_or_else(|| anyhow::anyhow!("manifest 中未找到资源: {name}"))?;
-                let blobs_decrypted = std::path::Path::new(&cfg.data_dir).join("blobs").join("decrypted");
+                let blobs_decrypted = std::path::Path::new(&cfg.data_dir)
+                    .join("blobs")
+                    .join("decrypted");
                 let output = asset::blob_path(&blobs_decrypted, "", &asset.hash);
-                asset::decrypt_file(std::path::Path::new(&file), &output, &cfg.asset_bundle_base_keys, asset.key)?;
+                asset::decrypt_file(
+                    std::path::Path::new(&file),
+                    &output,
+                    &cfg.asset_bundle_base_keys,
+                    asset.key,
+                )?;
                 println!("解密完成: {}", output.display());
             }
         },
 
-        Command::Master { variant, force, sub } => {
+        Command::Master {
+            variant,
+            force,
+            sub,
+        } => {
             let cfg = config::load()?;
             let data_dir = std::path::Path::new(&cfg.data_dir);
 
             match sub {
                 Some(MasterCmd::Packs) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
-                    let output_path = data_dir.join("exports").join("analysis").join("pack_names.json");
+                    let output_path = data_dir
+                        .join("exports")
+                        .join("analysis")
+                        .join("pack_names.json");
                     println!("生成 pack_names.json...");
                     let packs = master_data::generate_pack_names(&master_data_dir)?;
                     let json = serde_json::to_string_pretty(&packs)?;
@@ -371,61 +450,87 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Some(MasterCmd::Emblems) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
-                    let output_path = data_dir.join("exports").join("analysis").join("emblems_full.json");
+                    let output_path = data_dir
+                        .join("exports")
+                        .join("analysis")
+                        .join("emblems_full.json");
                     println!("生成 emblems_full.json...");
                     let count = master_data::generate_emblems_full(&master_data_dir, &output_path)?;
                     println!("完成: {} 个徽章 => {}", count, output_path.display());
                 }
                 Some(MasterCmd::Stamps) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
-                    let output_path = data_dir.join("exports").join("analysis").join("stamps_full.json");
+                    let output_path = data_dir
+                        .join("exports")
+                        .join("analysis")
+                        .join("stamps_full.json");
                     println!("生成 stamps_full.json...");
                     let count = master_data::generate_stamps_full(&master_data_dir, &output_path)?;
                     println!("完成: {} 个贴图 => {}", count, output_path.display());
                 }
                 Some(MasterCmd::Cards) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
-                    let output_path = data_dir.join("exports").join("analysis").join("cards_full.json");
+                    let output_path = data_dir
+                        .join("exports")
+                        .join("analysis")
+                        .join("cards_full.json");
                     println!("生成 cards_full.json...");
                     let count = master_data::generate_cards_full(&master_data_dir, &output_path)?;
                     println!("完成: {} 张卡 => {}", count, output_path.display());
                 }
                 None => {
                     for v in expand_variants(&variant) {
-                        let manifest_path = format!("{}/manifests/json/assetbundle.{}.manifest.json", cfg.data_dir, v);
-                let json = std::fs::read_to_string(&manifest_path)
-                    .with_context(|| format!("请先运行: wbu manifest -v {v} --format json"))?;
-                let m: manifest::Manifest = serde_json::from_str(&json)?;
+                        let manifest_path = format!(
+                            "{}/manifests/json/assetbundle.{}.manifest.json",
+                            cfg.data_dir, v
+                        );
+                        let json = std::fs::read_to_string(&manifest_path).with_context(|| {
+                            format!("请先运行: wbu manifest -v {v} --format json")
+                        })?;
+                        let m: manifest::Manifest = serde_json::from_str(&json)?;
 
-                let master_entry = m.raw_assets.iter()
-                    .find(|r| r.name == MASTER_BYTES_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("manifest 中未找到 {MASTER_BYTES_NAME}"))?;
+                        let master_entry = m
+                            .raw_assets
+                            .iter()
+                            .find(|r| r.name == MASTER_BYTES_NAME)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("manifest 中未找到 {MASTER_BYTES_NAME}")
+                            })?;
 
-                let blobs_raw = std::path::Path::new(&cfg.data_dir).join("blobs").join("raw");
-                let blob_path = asset::blob_path(&blobs_raw, "", &master_entry.hash);
+                        let blobs_raw = std::path::Path::new(&cfg.data_dir)
+                            .join("blobs")
+                            .join("raw");
+                        let blob_path = asset::blob_path(&blobs_raw, "", &master_entry.hash);
 
-                if force && blob_path.exists() {
-                    std::fs::remove_file(&blob_path)?;
-                    println!("[{v}] 已删除缓存，重新下载...");
-                }
+                        if force && blob_path.exists() {
+                            std::fs::remove_file(&blob_path)?;
+                            println!("[{v}] 已删除缓存，重新下载...");
+                        }
 
-                if !blob_path.exists() {
-                    println!("[{v}] 下载 {MASTER_BYTES_NAME} ...");
-                    asset::download_asset(&master_entry.hash, &cfg.asset_bundle_address, &blob_path).await?;
-                }
+                        if !blob_path.exists() {
+                            println!("[{v}] 下载 {MASTER_BYTES_NAME} ...");
+                            asset::download_asset(
+                                &master_entry.hash,
+                                &cfg.asset_bundle_address,
+                                &blob_path,
+                            )
+                            .await?;
+                        }
 
-                let raw = std::fs::read(&blob_path)
-                    .with_context(|| format!("无法读取: {}", blob_path.display()))?;
+                        let raw = std::fs::read(&blob_path)
+                            .with_context(|| format!("无法读取: {}", blob_path.display()))?;
 
-                let output_dir = std::path::Path::new(&cfg.data_dir)
-                    .join("exports").join("master-data").join(&v);
+                        let output_dir = std::path::Path::new(&cfg.data_dir)
+                            .join("exports")
+                            .join("master-data")
+                            .join(&v);
 
-                println!("[{v}] 导出到 {} ...", output_dir.display());
-                let results = master_data::export_all(&raw, &output_dir)?;
+                        println!("[{v}] 导出到 {} ...", output_dir.display());
+                        let results = master_data::export_all(&raw, &output_dir)?;
 
-                let total_rows: usize = results.iter().map(|r| r.rows).sum();
-                println!("[{v}] 完成: {} 个表, {} 行", results.len(), total_rows);
-            }
+                        let total_rows: usize = results.iter().map(|r| r.rows).sum();
+                        println!("[{v}] 完成: {} 个表, {} 行", results.len(), total_rows);
+                    }
                 }
             }
         }
@@ -439,18 +544,25 @@ async fn main() -> anyhow::Result<()> {
                 Some(AudioCmd::Card) => {
                     let variant = "Chs";
                     let card_resource_path = data_dir
-                        .join("exports").join("master-data").join(variant)
+                        .join("exports")
+                        .join("master-data")
+                        .join(variant)
                         .join("CardResourceMaster.json");
 
                     let first_variant = "Chs";
                     let mapping_path = data_dir
-                        .join("variants").join(first_variant).join("raw-assets")
+                        .join("variants")
+                        .join(first_variant)
+                        .join("raw-assets")
                         .join("sound/WwiseIdMapping.bytes");
                     let mapping_data = std::fs::read(&mapping_path)
                         .with_context(|| format!("请先运行 wbu asset batch -v {first_variant}"))?;
 
                     let pck_root = data_dir
-                        .join("variants").join(first_variant).join("raw-assets").join("sound");
+                        .join("variants")
+                        .join(first_variant)
+                        .join("raw-assets")
+                        .join("sound");
                     let output_dir = data_dir.join("exports").join("card-voices");
 
                     println!("CardResourceMaster: {}", card_resource_path.display());
@@ -459,29 +571,45 @@ async fn main() -> anyhow::Result<()> {
 
                     let audio_wav_dir = data_dir.join("exports").join("audio");
                     let stats = audio::card_voices::extract_card_voices(
-                        &pck_root, &output_dir, &card_resource_path,
-                        &audio_wav_dir, &mapping_data, vgmstream_path, &cfg.ffmpeg_path,
+                        &pck_root,
+                        &output_dir,
+                        &card_resource_path,
+                        &audio_wav_dir,
+                        &mapping_data,
+                        vgmstream_path,
+                        &cfg.ffmpeg_path,
                     )?;
 
-                    println!("\n卡牌语音提取完成: {} 张卡, {} 个 MP3 (跳过: {})", stats.cards_processed, stats.files_output, stats.files_skipped);
+                    println!(
+                        "\n卡牌语音提取完成: {} 张卡, {} 个 MP3 (跳过: {})",
+                        stats.cards_processed, stats.files_output, stats.files_skipped
+                    );
                 }
                 None => {
                     let first_variant = "Chs";
                     let mapping_path = data_dir
-                        .join("variants").join(first_variant).join("raw-assets")
+                        .join("variants")
+                        .join(first_variant)
+                        .join("raw-assets")
                         .join("sound/WwiseIdMapping.bytes");
                     let mapping_data = std::fs::read(&mapping_path)
                         .with_context(|| format!("请先运行 wbu asset batch -v {first_variant}"))?;
 
                     let pck_dir = data_dir
-                        .join("variants").join(first_variant).join("raw-assets").join("sound");
+                        .join("variants")
+                        .join(first_variant)
+                        .join("raw-assets")
+                        .join("sound");
                     let output_dir = data_dir.join("exports").join("audio");
 
                     println!("扫描 {}", pck_dir.display());
-                    let stats = audio::extract_all(&pck_dir, &output_dir, &mapping_data, vgmstream_path)?;
+                    let stats =
+                        audio::extract_all(&pck_dir, &output_dir, &mapping_data, vgmstream_path)?;
 
-                    println!("pck: {} | WAV: {} | 跳过: {} | 失败: {}",
-                        stats.pck_files, stats.wav_output, stats.skipped, stats.failed);
+                    println!(
+                        "pck: {} | WAV: {} | 跳过: {} | 失败: {}",
+                        stats.pck_files, stats.wav_output, stats.skipped, stats.failed
+                    );
 
                     if mp3 {
                         let mp3_dir = data_dir.join("exports").join("audio-mp3");
@@ -494,7 +622,10 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::Texture { sub } => match sub {
-            TextureCmd::Card { asset_studio, no_resize } => {
+            TextureCmd::Card {
+                asset_studio,
+                no_resize,
+            } => {
                 let cfg = config::load()?;
                 let as_path = match &asset_studio {
                     Some(p) => std::path::PathBuf::from(p),
@@ -521,6 +652,15 @@ async fn main() -> anyhow::Result<()> {
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_card_frames(data_dir, &as_path)?;
             }
+            TextureCmd::HomeIllustPicts { asset_studio } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                texture::process_home_illust_picts(data_dir, &as_path)?;
+            }
             TextureCmd::Emblems { asset_studio } => {
                 let cfg = config::load()?;
                 let as_path = match &asset_studio {
@@ -530,7 +670,10 @@ async fn main() -> anyhow::Result<()> {
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_emblems(data_dir, &as_path)?;
             }
-            TextureCmd::Stamps { asset_studio, variant } => {
+            TextureCmd::Stamps {
+                asset_studio,
+                variant,
+            } => {
                 let cfg = config::load()?;
                 let as_path = match &asset_studio {
                     Some(p) => std::path::PathBuf::from(p),
@@ -541,10 +684,13 @@ async fn main() -> anyhow::Result<()> {
                     texture::process_stamps(data_dir, &as_path, &v)?;
                 }
             }
-
         },
 
-        Command::HomeIllust { asset_studio, voices, layout_debug } => {
+        Command::HomeIllust {
+            asset_studio,
+            voices,
+            layout_debug,
+        } => {
             let cfg = config::load()?;
             let as_path = match &asset_studio {
                 Some(p) => std::path::PathBuf::from(p),
@@ -552,25 +698,60 @@ async fn main() -> anyhow::Result<()> {
             };
             let data_dir = std::path::Path::new(&cfg.data_dir);
             let vgmstream_path = std::path::Path::new(&cfg.vgmstream_path);
-            let stats = texture::home_illust::process_home_illustrations(data_dir, &as_path, vgmstream_path, voices, layout_debug)?;
-            println!("HomeIllustration 提取完成: {} | 跳过: {} | 失败: {}",
-                stats.processed, stats.skipped, stats.failed);
+            let stats = texture::home_illust::process_home_illustrations(
+                data_dir,
+                &as_path,
+                vgmstream_path,
+                voices,
+                layout_debug,
+            )?;
+            println!(
+                "HomeIllustration 提取完成: {} | 跳过: {} | 失败: {}",
+                stats.processed, stats.skipped, stats.failed
+            );
         }
 
         Command::Render { sub } => match sub {
-            RenderCmd::Card { id, all, res, name, type_, cost, attack, life, class, rarity, variant, font, number_font } => {
+            RenderCmd::Card {
+                id,
+                all,
+                res,
+                name,
+                type_,
+                cost,
+                attack,
+                life,
+                class,
+                rarity,
+                variant,
+                font,
+                number_font,
+            } => {
                 let cfg = config::load()?;
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 let font_path = font.as_deref().map(std::path::Path::new);
                 let number_font_path = number_font.as_deref().map(std::path::Path::new);
 
-                let has_overrides = res.is_some() || name.is_some() || type_.is_some()
+                let has_overrides = res.is_some()
+                    || name.is_some()
+                    || type_.is_some()
                     || rarity.is_some()
-                    || cost.is_some() || attack.is_some() || life.is_some() || class.is_some();
+                    || cost.is_some()
+                    || attack.is_some()
+                    || life.is_some()
+                    || class.is_some();
 
                 if all {
-                    anyhow::ensure!(!has_overrides, "--all 不支持与 --res / --name / --type 等覆盖参数同时使用");
-                    let stats = texture::render_all_card_images(data_dir, &variant, font_path, number_font_path)?;
+                    anyhow::ensure!(
+                        !has_overrides,
+                        "--all 不支持与 --res / --name / --type 等覆盖参数同时使用"
+                    );
+                    let stats = texture::render_all_card_images(
+                        data_dir,
+                        &variant,
+                        font_path,
+                        number_font_path,
+                    )?;
                     println!("批量渲染完成: {} | 跳过: {}", stats.rendered, stats.skipped);
                 } else if let Some(card_id) = id {
                     if has_overrides {
@@ -592,7 +773,13 @@ async fn main() -> anyhow::Result<()> {
                         )?;
                         println!("渲染完成: {}", out.display());
                     } else {
-                        let out = texture::render_card_image(data_dir, card_id, &variant, font_path, number_font_path)?;
+                        let out = texture::render_card_image(
+                            data_dir,
+                            card_id,
+                            &variant,
+                            font_path,
+                            number_font_path,
+                        )?;
                         println!("渲染完成: {}", out.display());
                     }
                 } else if let Some(image_path) = res {
@@ -618,12 +805,21 @@ async fn main() -> anyhow::Result<()> {
                     anyhow::bail!("请指定 --id、--all 或 --res");
                 }
             }
-            RenderCmd::Cards { variant, font, number_font } => {
+            RenderCmd::Cards {
+                variant,
+                font,
+                number_font,
+            } => {
                 let cfg = config::load()?;
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 let font_path = font.as_deref().map(std::path::Path::new);
                 let number_font_path = number_font.as_deref().map(std::path::Path::new);
-                let stats = texture::render_all_card_images(data_dir, &variant, font_path, number_font_path)?;
+                let stats = texture::render_all_card_images(
+                    data_dir,
+                    &variant,
+                    font_path,
+                    number_font_path,
+                )?;
                 println!("批量渲染完成: {} | 跳过: {}", stats.rendered, stats.skipped);
             }
         },

@@ -63,6 +63,8 @@ const EMBLEM_SOURCE_DIR: &str = "UI/Emblem";
 /// Stamp 贴图资源目录。
 const STAMP_SOURCE_DIR: &str = "UI/Stamp";
 
+/// Home Illustration 静态展示图资源目录。
+const HOME_ILLUST_PICT_SOURCE_DIR: &str = "UI/Home";
 
 /// 需要跳过的子路径
 const SKIP_PATTERNS: &[&str] = &["HighFoil"];
@@ -142,6 +144,13 @@ pub fn process_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow:
     extract_card_frames(data_dir, asset_studio_path)
 }
 
+/// 提取 Home Illustration 静态展示图 PNG。
+///
+/// 增量: 基于 SHA256 跳过已提取且未变化的。
+pub fn process_home_illust_picts(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
+    extract_home_illust_picts(data_dir, asset_studio_path)
+}
+
 /// 提取徽章纹理: 从 UI/Emblem 解密 AB 中导出 PNG。
 ///
 /// 增量: 基于 SHA256 跳过已提取且未变化的。
@@ -151,10 +160,13 @@ pub fn process_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Res
 /// 提取贴图纹理: 从 UI/Stamp 解密 AB 中导出 PNG。
 ///
 /// 增量: 基于 SHA256 跳过已提取且未变化的。
-pub fn process_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> anyhow::Result<()> {
+pub fn process_stamps(
+    data_dir: &Path,
+    asset_studio_path: &Path,
+    variant: &str,
+) -> anyhow::Result<()> {
     extract_stamps(data_dir, asset_studio_path, variant)
 }
-
 
 /// 渲染单张完整卡牌图。
 pub fn render_card_image(
@@ -242,7 +254,9 @@ pub fn render_custom_card(
     }
 
     // 边框
-    let rarity_name = rarity.and_then(|r| rarity_name_from_str(r).ok()).unwrap_or("bronze");
+    let rarity_name = rarity
+        .and_then(|r| rarity_name_from_str(r).ok())
+        .unwrap_or("bronze");
     let frame_path = data_dir
         .join("exports")
         .join("card-frames")
@@ -285,17 +299,18 @@ pub fn render_custom_card(
     let art_src = image::open(image_path)
         .with_context(|| format!("无法打开卡图: {}", image_path.display()))?
         .to_rgba8();
-    let art = if art_src.width() != layout.art.crop_width || art_src.height() != layout.art.crop_height {
-        DynamicImage::ImageRgba8(art_src)
-            .resize_exact(
-                layout.art.crop_width,
-                layout.art.crop_height,
-                image::imageops::FilterType::Lanczos3,
-            )
-            .to_rgba8()
-    } else {
-        art_src
-    };
+    let art =
+        if art_src.width() != layout.art.crop_width || art_src.height() != layout.art.crop_height {
+            DynamicImage::ImageRgba8(art_src)
+                .resize_exact(
+                    layout.art.crop_width,
+                    layout.art.crop_height,
+                    image::imageops::FilterType::Lanczos3,
+                )
+                .to_rgba8()
+        } else {
+            art_src
+        };
     let art_crop = crop_configured_art(&art, &layout.art)?;
     let art_resized = DynamicImage::ImageRgba8(art_crop)
         .resize_exact(
@@ -423,9 +438,7 @@ pub fn render_card_with_overrides(
         anyhow::bail!("暂不渲染进化派生卡");
     }
 
-    let kind = kind_override.unwrap_or_else(|| {
-        card_kind(card.card_id).unwrap_or("follower")
-    });
+    let kind = kind_override.unwrap_or_else(|| card_kind(card.card_id).unwrap_or("follower"));
     let rarity = if let Some(r) = rarity_override {
         rarity_name_from_str(r)?
     } else {
@@ -1143,7 +1156,6 @@ fn extract_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Res
         std::fs::copy(src, dst)?;
     }
 
-    
     run_asset_studio_on_dir(&temp_input, &temp_output, asset_studio_path, false)?;
 
     let mut exported = 0usize;
@@ -1186,7 +1198,9 @@ fn extract_card_class_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow
 
     // 检查是否已有全部 8 个图标（含两版本）
     let all_exist = (0..=7).all(|idx| {
-        output_dir.join(format!("card2d_class_icon_{idx}.png")).exists()
+        output_dir
+            .join(format!("card2d_class_icon_{idx}.png"))
+            .exists()
             && output_dir
                 .join(format!("card2d_class_icon_{idx}_high_premium.png"))
                 .exists()
@@ -1210,11 +1224,12 @@ fn extract_card_class_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow
 
     std::fs::copy(&source_file, temp_input.join("Card2D.ab"))?;
 
-// 导出 Sprite（图集中的各个精灵），而不是 Texture2D
+    // 导出 Sprite（图集中的各个精灵），而不是 Texture2D
     {
         let spinner = ProgressBar::new_spinner();
         spinner.set_style(
-            ProgressStyle::with_template("{spinner} AssetStudio 导出 Sprite 中... {elapsed}").unwrap(),
+            ProgressStyle::with_template("{spinner} AssetStudio 导出 Sprite 中... {elapsed}")
+                .unwrap(),
         );
         spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
@@ -1338,7 +1353,9 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
         let mut buf = [0u8; 8192];
         loop {
             let n = file.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher.update(&buf[..n]);
         }
         let hash = format!("{:x}", hasher.finalize());
@@ -1367,8 +1384,12 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
     // 临时目录
     let temp_input = output_dir.join(".temp_input");
     let temp_output = output_dir.join(".temp_output");
-    if temp_input.exists() { std::fs::remove_dir_all(&temp_input)?; }
-    if temp_output.exists() { std::fs::remove_dir_all(&temp_output)?; }
+    if temp_input.exists() {
+        std::fs::remove_dir_all(&temp_input)?;
+    }
+    if temp_output.exists() {
+        std::fs::remove_dir_all(&temp_output)?;
+    }
     std::fs::create_dir_all(&temp_input)?;
     std::fs::create_dir_all(&temp_output)?;
 
@@ -1396,12 +1417,18 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
     let status = Command::new(asset_studio_path)
         .arg(&temp_input)
         .args([
-            "-t", "tex2d",
-            "-g", "fileName",
-            "-f", "assetName",
-            "-o", &temp_output.to_string_lossy(),
-            "--unity-version", UNITY_VERSION,
-            "--log-level", "warning",
+            "-t",
+            "tex2d",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName",
+            "-o",
+            &temp_output.to_string_lossy(),
+            "--unity-version",
+            UNITY_VERSION,
+            "--log-level",
+            "warning",
         ])
         .status()
         .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
@@ -1422,7 +1449,9 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
             .strip_suffix(".ab")
             .unwrap_or(&name);
 
-        if !stale_ids.contains(&id.to_string()) { continue; }
+        if !stale_ids.contains(&id.to_string()) {
+            continue;
+        }
 
         let dest = output_dir.join(format!("{}.png", id));
         let export_dir = temp_output.join(format!("{}_export", name));
@@ -1520,7 +1549,9 @@ fn extract_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> a
         let mut buf = [0u8; 8192];
         loop {
             let n = file.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher.update(&buf[..n]);
         }
         let hash = format!("{:x}", hasher.finalize());
@@ -1548,8 +1579,12 @@ fn extract_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> a
 
     let temp_input = output_dir.join(".temp_input");
     let temp_output = output_dir.join(".temp_output");
-    if temp_input.exists() { std::fs::remove_dir_all(&temp_input)?; }
-    if temp_output.exists() { std::fs::remove_dir_all(&temp_output)?; }
+    if temp_input.exists() {
+        std::fs::remove_dir_all(&temp_input)?;
+    }
+    if temp_output.exists() {
+        std::fs::remove_dir_all(&temp_output)?;
+    }
     std::fs::create_dir_all(&temp_input)?;
     std::fs::create_dir_all(&temp_output)?;
 
@@ -1576,12 +1611,18 @@ fn extract_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> a
     let status = Command::new(asset_studio_path)
         .arg(&temp_input)
         .args([
-            "-t", "tex2d",
-            "-g", "fileName",
-            "-f", "assetName",
-            "-o", &temp_output.to_string_lossy(),
-            "--unity-version", UNITY_VERSION,
-            "--log-level", "warning",
+            "-t",
+            "tex2d",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName",
+            "-o",
+            &temp_output.to_string_lossy(),
+            "--unity-version",
+            UNITY_VERSION,
+            "--log-level",
+            "warning",
         ])
         .status()
         .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
@@ -1602,7 +1643,9 @@ fn extract_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> a
             .strip_suffix(".ab")
             .unwrap_or(&name);
 
-        if !stale_ids.contains(&id.to_string()) { continue; }
+        if !stale_ids.contains(&id.to_string()) {
+            continue;
+        }
 
         let dest = output_dir.join(format!("{}.png", id));
         let export_dir = temp_output.join(format!("{}_export", name));
@@ -1625,6 +1668,143 @@ fn extract_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> a
     Ok(())
 }
 
+fn extract_home_illust_picts(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
+    use sha2::Digest;
+    use std::collections::BTreeMap;
+    use std::io::Read;
+
+    let source_dir = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("decrypted")
+        .join(HOME_ILLUST_PICT_SOURCE_DIR);
+
+    if !source_dir.exists() {
+        anyhow::bail!(
+            "Home Illustration pict 源目录不存在: {}（请先运行 wbu asset batch -v Chs）",
+            source_dir.display()
+        );
+    }
+
+    let output_dir = data_dir.join("exports").join("home-illustration-picts");
+    std::fs::create_dir_all(&output_dir)?;
+
+    let hash_cache_path = output_dir.join(".hashes.json");
+    let hash_cache: BTreeMap<String, String> = if hash_cache_path.exists() {
+        let raw = std::fs::read_to_string(&hash_cache_path)?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+
+    let mut bundles: Vec<_> = std::fs::read_dir(&source_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("utx_pict_Illustration_") && name.ends_with(".ab")
+        })
+        .collect();
+    bundles.sort_by_key(|e| e.file_name());
+
+    if bundles.is_empty() {
+        println!("UI/Home 中没有 utx_pict_Illustration_*.ab，跳过");
+        return Ok(());
+    }
+
+    let mut current_hashes: BTreeMap<String, String> = BTreeMap::new();
+    let mut stale_ids = Vec::new();
+
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("utx_pict_Illustration_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name)
+            .to_string();
+
+        let mut file = std::fs::File::open(entry.path())?;
+        let mut hasher = sha2::Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        current_hashes.insert(id.clone(), hash.clone());
+
+        let png_path = output_dir.join(format!("hi_{id}.png"));
+        if !png_path.exists() || hash_cache.get(&id) != Some(&hash) {
+            stale_ids.push(id);
+        }
+    }
+
+    if stale_ids.is_empty() {
+        println!(
+            "Home Illustration pict 全部已是最新（{} 个）",
+            bundles.len()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "需要更新 {} 个 Home Illustration pict（共 {} 个，{} 个已是最新）",
+        stale_ids.len(),
+        bundles.len(),
+        bundles.len() - stale_ids.len()
+    );
+
+    let temp_input = output_dir.join(".temp_input");
+    let temp_output = output_dir.join(".temp_output");
+    if temp_input.exists() {
+        std::fs::remove_dir_all(&temp_input)?;
+    }
+    if temp_output.exists() {
+        std::fs::remove_dir_all(&temp_output)?;
+    }
+    std::fs::create_dir_all(&temp_input)?;
+    std::fs::create_dir_all(&temp_output)?;
+
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("utx_pict_Illustration_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name);
+        if stale_ids.iter().any(|stale| stale == id) {
+            std::fs::copy(entry.path(), temp_input.join(entry.file_name()))?;
+        }
+    }
+
+    run_asset_studio_on_dir(&temp_input, &temp_output, asset_studio_path, false)?;
+
+    let mut exported = 0usize;
+    for id in &stale_ids {
+        let bundle_name = format!("utx_pict_Illustration_{id}.ab");
+        let export_dir = temp_output.join(format!("{bundle_name}_export"));
+        let dest = output_dir.join(format!("hi_{id}.png"));
+        if let Ok(pngs) = find_pngs(&export_dir) {
+            if let Some(png_path) = pngs.first() {
+                std::fs::rename(png_path, &dest)?;
+                exported += 1;
+                debug!("Home Illustration pict 更新: {} -> {}", id, dest.display());
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_input);
+    let _ = std::fs::remove_dir_all(&temp_output);
+
+    let json = serde_json::to_string_pretty(&current_hashes)?;
+    std::fs::write(&hash_cache_path, json)?;
+
+    println!("Home Illustration pict 提取完成: 更新 {} 个", exported);
+    Ok(())
+}
 
 fn run_asset_studio_on_dir(
     input_dir: &Path,
@@ -2231,9 +2411,9 @@ mod tests {
     #[test]
     fn test_card_kind_mapping() {
         // card_id[5] = 1 -> follower, 2 -> amulet, 3 -> spell
-        assert_eq!(card_kind(10001110).unwrap(), "follower");  // 不屈的剑斗士
-        assert_eq!(card_kind(10001210).unwrap(), "amulet");    // 侦探的放大镜
-        assert_eq!(card_kind(10012310).unwrap(), "spell");     // 昆虫的忠告
+        assert_eq!(card_kind(10001110).unwrap(), "follower"); // 不屈的剑斗士
+        assert_eq!(card_kind(10001210).unwrap(), "amulet"); // 侦探的放大镜
+        assert_eq!(card_kind(10012310).unwrap(), "spell"); // 昆虫的忠告
         assert!(card_kind(65401010).is_err()); // cid[5]=0 = leader
         assert!(card_kind(65044910).is_err()); // cid[5]=9 = token
     }
