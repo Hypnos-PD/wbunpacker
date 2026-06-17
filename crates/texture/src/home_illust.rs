@@ -425,20 +425,20 @@ fn lookup_character_names(
     let jp_name = meta.leader_names.get(&hi_id).cloned();
     let mut names = HashMap::new();
 
-    // 1. CardText → MasterTextLabel（完整卡名，适用于长 ID）
-    if let Some(label) = meta.card_name_labels.get(&hi_id) {
-        for (variant, map) in &meta.text_labels {
-            if let Some(text) = map.get(label) {
-                names.insert(variant.clone(), text.clone());
-            }
-        }
-    }
-
-    // 2. HomeIllustrationName_{hi_id}（短名称，适用于所有 ID）
+    // 1. HomeIllustrationName_{hi_id}（主页展示名，优先用于 Home Illustration）
     let home_label = format!("HomeIllustrationName_{hi_id}");
     for (variant, map) in &meta.text_labels {
         if let Some(text) = map.get(&home_label) {
-            names.entry(variant.clone()).or_insert_with(|| text.clone());
+            names.insert(variant.clone(), text.clone());
+        }
+    }
+
+    // 2. CardText → MasterTextLabel（完整卡名，仅补齐缺失语言）
+    if let Some(label) = meta.card_name_labels.get(&hi_id) {
+        for (variant, map) in &meta.text_labels {
+            if let Some(text) = map.get(label) {
+                names.entry(variant.clone()).or_insert_with(|| text.clone());
+            }
         }
     }
 
