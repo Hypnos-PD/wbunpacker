@@ -38,7 +38,7 @@ use std::process::Command;
 
 const UNITY_VERSION: &str = "2022.3.62f2";
 const HOME_ILLUST_DIR: &str = "Prefabs/UI/HomeIllustration";
-const HOME_ILLUST_CONFIG_VERSION: u32 = 3;
+const HOME_ILLUST_CONFIG_VERSION: u32 = 4;
 
 /// 需要跳过的非插画资源
 const SKIP_NAMES: &[&str] = &["HomeIllustBG", "UIHomeIllustMessageWindow"];
@@ -557,7 +557,12 @@ fn extract_one(
         fs::copy(path, output_dir.join(format!("spine_{stem}.skel")))?;
     }
     if let Some(ref path) = spine_atlas {
-        fs::copy(path, output_dir.join(format!("spine_{stem}.atlas")))?;
+        copy_atlas_with_page_name(
+            path,
+            &output_dir.join(format!("spine_{stem}.atlas")),
+            spine_png.as_deref(),
+            &format!("spine_{stem}.png"),
+        )?;
     }
     if let Some(ref path) = spine_png {
         fs::copy(path, output_dir.join(format!("spine_{stem}.png")))?;
@@ -732,6 +737,37 @@ fn config_has_layout_debug(path: &Path) -> bool {
         Err(_) => return false,
     };
     value.get("layout_debug").is_some()
+}
+
+fn copy_atlas_with_page_name(
+    src: &Path,
+    dst: &Path,
+    src_page: Option<&Path>,
+    dst_page_name: &str,
+) -> anyhow::Result<()> {
+    let mut atlas =
+        fs::read_to_string(src).with_context(|| format!("读取 atlas 失败: {}", src.display()))?;
+
+    if let Some(page) = src_page
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+    {
+        atlas = atlas
+            .lines()
+            .map(|line| {
+                if line.trim() == page {
+                    dst_page_name
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        atlas.push('\n');
+    }
+
+    fs::write(dst, atlas).with_context(|| format!("写入 atlas 失败: {}", dst.display()))?;
+    Ok(())
 }
 
 #[derive(Debug, Default)]
