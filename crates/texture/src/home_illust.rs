@@ -38,7 +38,7 @@ use std::process::Command;
 
 const UNITY_VERSION: &str = "2022.3.62f2";
 const HOME_ILLUST_DIR: &str = "Prefabs/UI/HomeIllustration";
-const HOME_ILLUST_CONFIG_VERSION: u32 = 4;
+const HOME_ILLUST_CONFIG_VERSION: u32 = 5;
 
 /// 需要跳过的非插画资源
 const SKIP_NAMES: &[&str] = &["HomeIllustBG", "UIHomeIllustMessageWindow"];
@@ -171,6 +171,8 @@ struct IllustConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     layout_debug: Option<LayoutDebug>,
     bg_textures: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    switch_targets: Vec<String>,
     has_effects: bool,
 }
 
@@ -406,6 +408,36 @@ fn parse_hi_id(stem: &str) -> Option<i64> {
     stem.strip_prefix("hi_")?.parse().ok()
 }
 
+fn parse_bg_hi_id(name: &str) -> Option<i64> {
+    name.strip_prefix("bg_hi_")?
+        .strip_suffix(".png")?
+        .parse()
+        .ok()
+}
+
+fn select_backgrounds(
+    hi_id: Option<i64>,
+    spine_skel: &Option<PathBuf>,
+    candidates: &[(String, PathBuf)],
+) -> Vec<String> {
+    let mut names: Vec<String> = candidates.iter().map(|(name, _)| name.clone()).collect();
+    names.sort();
+    names.dedup();
+
+    if let Some(id) = hi_id {
+        let own_name = format!("bg_hi_{id}.png");
+        if names.iter().any(|name| name == &own_name) {
+            return vec![own_name];
+        }
+    }
+
+    if spine_skel.is_none() {
+        return names;
+    }
+
+    Vec::new()
+}
+
 /// 判断是否为战斗背景（2001-2108 范围）
 fn is_battle_background(hi_id: i64) -> bool {
     (2001..=2108).contains(&hi_id)
@@ -503,7 +535,7 @@ fn extract_one(
     let mut spine_skel: Option<PathBuf> = None;
     let mut spine_atlas: Option<PathBuf> = None;
     let mut spine_png: Option<PathBuf> = None;
-    let mut bg_pngs: Vec<String> = Vec::new();
+    let mut bg_candidates: Vec<(String, PathBuf)> = Vec::new();
     let mut has_effects = false;
 
     // Unity JSON 数据
@@ -529,8 +561,7 @@ fn extract_one(
         {
             spine_png = Some(file.clone());
         } else if name.ends_with(".png") && name.starts_with("bg_hi_") {
-            bg_pngs.push(name.clone());
-            fs::copy(file, output_dir.join(&name))?;
+            bg_candidates.push((name.clone(), file.clone()));
         } else if name.ends_with(".png") && name.starts_with("ef_") {
             has_effects = true;
             fs::create_dir_all(&fx_dir)?;
@@ -552,6 +583,17 @@ fn extract_one(
         }
     }
 
+    let hi_id = parse_hi_id(&stem);
+    let bg_pngs = select_backgrounds(hi_id, &spine_skel, &bg_candidates);
+    for name in &bg_pngs {
+        if let Some((_, path)) = bg_candidates
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+        {
+            fs::copy(path, output_dir.join(name))?;
+        }
+    }
+
     // 4. 复制核心 Spine 文件
     if let Some(ref path) = spine_skel {
         fs::copy(path, output_dir.join(format!("spine_{stem}.skel")))?;
@@ -569,7 +611,6 @@ fn extract_one(
     }
 
     // 5. 生成 config.json
-    let hi_id = parse_hi_id(&stem);
     let config = build_config(
         &stem,
         source_hash,
@@ -594,6 +635,7 @@ fn extract_one(
             None
         },
         &bg_pngs,
+        spine_skel.is_some(),
         has_effects,
     );
 
@@ -1362,12 +1404,34 @@ fn build_config(
     prefab_transforms: PrefabTransforms,
     layout_debug: Option<LayoutDebug>,
     bg_textures: &[String],
+    has_spine: bool,
     has_effects: bool,
 ) -> IllustConfig {
+    let switch_targets: Vec<String> = if !has_spine && bg_textures.len() > 1 {
+        let mut targets: Vec<String> = bg_textures
+            .iter()
+            .filter_map(|name| parse_bg_hi_id(name).map(|id| format!("hi_{id}")))
+            .collect();
+        targets.sort();
+        targets.dedup();
+        targets
+    } else {
+        Vec::new()
+    };
+
     let (illust_type, character_name, character_names, voice_prefix, voice_files) = match hi_id {
         Some(id) if is_battle_background(id) => {
             let (jp_name, names) = lookup_character_names(meta, id);
             ("battle".to_string(), jp_name, names, None, vec![])
+        }
+        Some(id) if !switch_targets.is_empty() => {
+            let (jp_name, names) = lookup_character_names(meta, id);
+            let primary_name = jp_name.or_else(|| names.get("jpn").cloned());
+            let vp = Some(format!("dx_home_{id}"));
+            let vf = (1..=4)
+                .map(|n| format!("Play_dx_home_{id}_{n}.wav"))
+                .collect();
+            ("switch".to_string(), primary_name, names, vp, vf)
         }
         Some(id) => {
             let (jp_name, names) = lookup_character_names(meta, id);
@@ -1484,6 +1548,7 @@ fn build_config(
         aspect_layouts,
         layout_debug,
         bg_textures: bg_textures.to_vec(),
+        switch_targets,
         has_effects,
     }
 }
