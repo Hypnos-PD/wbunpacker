@@ -24,13 +24,10 @@ asset_bundle_address = "https://shadowverse-wb.akamaized.net/dl/assetbundles/Win
 version_address = "https://web11.shadowverse-wb.jp/cygames/Version/info"
 
 # 请求头
-common_header = ""
 routing_header = ""
 
 # 客户端信息
 app_version = "1.7.10"
-device_uuid = ""
-md5_salt = ""
 client_id = 0
 
 # 解密密钥

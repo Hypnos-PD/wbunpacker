@@ -22,5 +22,5 @@ asset = { path = "../asset" }
 master-data = { path = "../master-data" }
 audio = { path = "../audio" }
 texture = { path = "../texture" }
-version = { path = "../version" }
 metadb = { path = "../metadb" }
+

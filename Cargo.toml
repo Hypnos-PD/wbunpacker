@@ -6,7 +6,6 @@ members = [
   "crates/asset",
   "crates/master-data",
   "crates/audio",
-  "crates/version",
   "crates/metadb",
   "crates/texture",
 ]
@@ -15,3 +14,4 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+
