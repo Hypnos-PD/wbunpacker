@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
-"""Search game process memory for sqlite3mc key bytes.
+"""Hook sqlite3_key_v2 in a running ShadowverseWB process.
 
-Usage: Run Shadowverse WB to title screen first, then:
+The game uses AES-256-OFB (not XOR), so we can't search for
+keystream. Instead we search for the sqlite3_key_v2 function
+entry bytes, then dump nearby memory for the key argument.
+
+Usage: Run game to title screen, then:
   python tools/hook_key.py
-
-It scans the game process memory for a known final_key fragment
-(derived from encrypted meta.db XOR "SQLite format 3\0") and
-prints surrounding bytes.
 """
 
 import ctypes
 from ctypes import wintypes
+import struct
 
-FINAL_KEY_FRAG = bytes.fromhex("66c7ce719582ebea7595d66a39ff65ae")
 PROCESS_VM_READ = 0x0010
+PROCESS_VM_OPERATION = 0x0008
 PROCESS_QUERY_INFORMATION = 0x0400
-TH32CS_SNAPPROCESS = 0x00000002
+MEM_COMMIT = 0x1000
 
 k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 def find_game_pid():
-    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    snap = k32.CreateToolhelp32Snapshot(0x00000002, 0)
     entry = wintypes.PROCESSENTRY32W()
     entry.dwSize = ctypes.sizeof(entry)
     if k32.Process32FirstW(snap, ctypes.byref(entry)):
@@ -33,62 +34,91 @@ def find_game_pid():
     k32.CloseHandle(snap)
     return None
 
-def scan(pid, needle):
-    h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
-    if not h:
-        print("Cannot open process (admin may be needed)")
-        return
-    si = wintypes.SYSTEM_INFO()
-    k32.GetSystemInfo(ctypes.byref(si))
-    lo, hi = si.lpMinimumApplicationAddress, si.lpMaximumApplicationAddress
-    mbi = wintypes.MEMORY_BASIC_INFORMATION()
+def get_module_base(pid, mod_name):
+    """Get base address of a loaded module in the target process."""
+    snap = k32.CreateToolhelp32Snapshot(0x00000008, pid)  # TH32CS_SNAPMODULE
+    if snap == -1:
+        return None
+    entry = wintypes.MODULEENTRY32W()
+    entry.dwSize = ctypes.sizeof(entry)
+    if k32.Module32FirstW(snap, ctypes.byref(entry)):
+        while True:
+            if entry.szModule.lower() == mod_name.lower():
+                k32.CloseHandle(snap)
+                return entry.modBaseAddr
+            if not k32.Module32NextW(snap, ctypes.byref(entry)):
+                break
+    k32.CloseHandle(snap)
+    return None
+
+def dump_module_memory(h, base, size):
+    """Dump a module's memory and scan for a pattern."""
     buf = (ctypes.c_char * 65536)()
-    addr = lo
-    found = 0
-    while addr < hi:
-        if not k32.VirtualQueryEx(h, addr, ctypes.byref(mbi), ctypes.sizeof(mbi)):
-            addr += 65536; continue
-        if mbi.State != 0x1000 or mbi.Protect & 0x100:
-            addr = mbi.BaseAddress + mbi.RegionSize; continue
-        ra, re = mbi.BaseAddress, mbi.BaseAddress + mbi.RegionSize
-        while ra < re:
-            sz = min(65536, re - ra)
-            nr = wintypes.SIZE_T()
-            if k32.ReadProcessMemory(h, ra, buf, sz, ctypes.byref(nr)):
-                data = bytes(buf[:nr.value])
-                idx = 0
-                while True:
-                    idx = data.find(needle, idx)
-                    if idx == -1: break
-                    ma = ra + idx
-                    cb = (ctypes.c_char * 256)()
-                    cn = wintypes.SIZE_T()
-                    if k32.ReadProcessMemory(h, max(ma-32, 0), cb, 256, ctypes.byref(cn)):
-                        ctx = bytes(cb[:cn.value])
-                        offset = min(idx, 32)
-                        key_data = ctx[offset:offset+len(needle)+32]
-                        print(f"Match at 0x{ma:X}: {key_data.hex()}")
-                        # Try to show as base64 if printable
-                        try:
-                            import base64
-                            b64 = base64.b64encode(key_data).decode()
-                            print(f"  b64: {b64}")
-                        except: pass
-                        found += 1
-                        if found >= 5:
-                            print("(stopping after 5 matches)")
-                            k32.CloseHandle(h); return
-                    idx += 1
-            ra += sz
-        addr = mbi.BaseAddress + mbi.RegionSize
-    k32.CloseHandle(h)
-    if found == 0:
-        print("No matches. Key may not be in committed memory yet.")
+    addr = base
+    remaining = size
+    while remaining > 0:
+        chunk = min(65536, remaining)
+        nr = wintypes.SIZE_T()
+        if k32.ReadProcessMemory(h, addr, buf, chunk, ctypes.byref(nr)):
+            data = bytes(buf[:nr.value])
+            yield addr, data
+        addr += chunk
+        remaining -= chunk
+
+def find_sqlite_key_v2_function(dll_data, dll_base):
+    """Find sqlite3_key_v2 in libnative.dll by scanning for its function prologue."""
+    # The function prologue of sqlite3_key_v2 from the DLL:
+    # We know the RVA from dumpbin: 0x10BD80
+    # Let's use the known RVA since we have dumpbin output
+    return dll_base + 0x10BD80
 
 if __name__ == "__main__":
     pid = find_game_pid()
     if not pid:
         print("ShadowverseWB.exe not running. Start the game first.")
-    else:
-        print(f"PID={pid}, searching for {FINAL_KEY_FRAG.hex()}")
-        scan(pid, FINAL_KEY_FRAG)
+        exit(1)
+    
+    print(f"Found PID={pid}")
+    
+    libnative_base = get_module_base(pid, "libnative.dll")
+    if not libnative_base:
+        print("libnative.dll not loaded yet. Wait for the game to reach title screen.")
+        exit(1)
+    
+    print(f"libnative.dll base: 0x{libnative_base:X}")
+    
+    h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+    if not h:
+        print("Cannot open process (run as admin)")
+        exit(1)
+    
+    # Read the sqlite3_key_v2 function prologue to identify it
+    key_v2_rva = 0x10BD80
+    key_v2_addr = libnative_base + key_v2_rva
+    fbuf = (ctypes.c_char * 64)()
+    fnr = wintypes.SIZE_T()
+    if k32.ReadProcessMemory(h, key_v2_addr, fbuf, 64, ctypes.byref(fnr)):
+        prologue = bytes(fbuf[:fnr.value])
+        print(f"sqlite3_key_v2 at 0x{key_v2_addr:X}: {prologue[:16].hex()}")
+    
+    # Scan the whole libnative.dll for references to sqlite3_key_v2
+    # and dump strings nearby
+    dll_size = 0x310000  # ~3MB from file size
+    print(f"Scanning libnative.dll memory for keyword 'key'...")
+    
+    key_pattern = b'sqlite3_key'
+    for addr, data in dump_module_memory(h, libnative_base, dll_size):
+        idx = 0
+        while True:
+            idx = data.find(key_pattern, idx)
+            if idx == -1: break
+            match_addr = addr + idx
+            ctx_buf = (ctypes.c_char * 256)()
+            ctx_nr = wintypes.SIZE_T()
+            if k32.ReadProcessMemory(h, match_addr - 32, ctx_buf, 256, ctypes.byref(ctx_nr)):
+                ctx = bytes(ctx_buf[:ctx_nr.value])
+                print(f"  'sqlite3_key' at 0x{match_addr:X}: {ctx[32:96].hex()}")
+            idx += len(key_pattern)
+    
+    k32.CloseHandle(h)
+    print("Done. Check above for key material near sqlite3_key references.")
