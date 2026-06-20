@@ -74,11 +74,7 @@ enum Command {
         #[arg(short, long)]
         output: Option<String>,
     },
-    /// 导出本地化文本 (骨架)
-    Localize {
-        #[arg(short, long)]
-        file: String,
-    },
+    
 }
 #[derive(Subcommand)]
 enum AssetCmd {
@@ -756,7 +752,6 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Metadb { .. } => todo!("metadb"),
-        Command::Localize { .. } => todo!("localize"),
-    }
+            }
     Ok(())
 }
