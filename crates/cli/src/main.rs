@@ -73,6 +73,8 @@ enum Command {
         path: String,
         #[arg(short, long)]
         output: Option<String>,
+        #[arg(long)]
+        dll: Option<String>,
     },
     
 }
@@ -751,7 +753,25 @@ async fn main() -> anyhow::Result<()> {
                 println!("批量渲染完成: {} | 跳过: {}", stats.rendered, stats.skipped);
             }
         },
-        Command::Metadb { .. } => todo!("metadb"),
+                Command::Metadb { path, output, dll } => {
+            let cfg = config::load()?;
+            let data_dir = std::path::Path::new(&cfg.data_dir);
+            let default_dll = r"C:\Program Files (x86)\Steam\steamapps\common\ShadowverseWB\ShadowverseWB_Data\Plugins\x86_64\libnative.dll";
+            let dll_path = dll.as_deref().unwrap_or(default_dll);
+            let output_path = output.unwrap_or_else(|| {
+                data_dir.join("exports").join("meta").join("meta.db")
+                    .display().to_string()
+            });
+            metadb::decrypt_metadb(
+                std::path::Path::new(&path),
+                std::path::Path::new(&output_path),
+                std::path::Path::new(dll_path),
+                &cfg.sqlite3mc_key,
+                &cfg.sqlite3mc_base_key,
+            )?;
+            println!("Decrypted: {}", output_path);
+        }
             }
     Ok(())
 }
+
