@@ -90,12 +90,7 @@ pub struct AudioExtractStats {
 /// 5. 验证条目有效性（wem_id > 0x100000, flag1/flag2 == 1, offset 在合法范围内）
 pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
     if data.len() < 8 || &data[..4] != AKPK_MAGIC {
-        return HashMap::new();
-    }
-
-    let didx_entries = parse_didx_data(data);
-    if !didx_entries.is_empty() {
-        return didx_entries;
+        return parse_didx_data(data);
     }
 
     let hdr_size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;

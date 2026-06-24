@@ -147,7 +147,7 @@ struct IllustConfig {
     /// 角色名（日文/通用）
     character_name: Option<String>,
     /// 各语言本地化名 { "chs": "...", "eng": "...", ... }
-    character_names: HashMap<String, String>,
+    character_names: BTreeMap<String, String>,
     /// "home" | "battle"
     illust_type: String,
     /// Wwise voice_prefix（dx_home_{id}）
@@ -167,7 +167,7 @@ struct IllustConfig {
     skeleton_scale: f64,
     home_position: Option<HomePosition>,
     prefab_transforms: PrefabTransforms,
-    aspect_layouts: HashMap<String, AspectLayout>,
+    aspect_layouts: BTreeMap<String, AspectLayout>,
     #[serde(skip_serializing_if = "Option::is_none")]
     layout_debug: Option<LayoutDebug>,
     bg_textures: Vec<String>,
@@ -456,9 +456,9 @@ fn battle_to_leader_id(hi_id: i64) -> Option<i64> {
 fn lookup_character_names(
     meta: &HomeIllustMeta,
     hi_id: i64,
-) -> (Option<String>, HashMap<String, String>) {
+) -> (Option<String>, BTreeMap<String, String>) {
     let jp_name = meta.leader_names.get(&hi_id).cloned();
-    let mut names = HashMap::new();
+    let mut names = BTreeMap::new();
 
     // 1. HomeIllustrationName_{hi_id}（主页展示名，优先用于 Home Illustration）
     let home_label = format!("HomeIllustrationName_{hi_id}");
@@ -733,7 +733,9 @@ fn find_single_subdir(dir: &Path) -> anyhow::Result<PathBuf> {
 
 fn collect_files(dir: &Path, result: &mut Vec<PathBuf>) {
     if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
+        let mut sortable: Vec<_> = entries.flatten().collect();
+        sortable.sort_by_key(|e| e.file_name());
+        for entry in sortable {
             let path = entry.path();
             if path.is_dir() {
                 collect_files(&path, result);
@@ -889,16 +891,18 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
 
     let mut nodes = BTreeMap::new();
     let root_transform = game_objects
-        .values()
-        .find(|go| go.name == stem)
-        .map(|go| go.transform_id);
+        .iter()
+        .filter(|(_, go)| go.name == stem)
+        .map(|(id, _)| *id)
+        .min();
     let character_transform = transform_by_go_name(&game_objects, "Character");
     let spine_root_transform = transform_by_go_name(&game_objects, &format!("spine_{stem}"));
     let spine_object_transform = game_objects
-        .values()
-        .filter(|go| go.name.starts_with("Spine GameObject"))
-        .map(|go| go.transform_id)
-        .find(|id| Some(*id) != root_transform)
+        .iter()
+        .filter(|(_, go)| go.name.starts_with("Spine GameObject"))
+        .map(|(id, _)| *id)
+        .filter(|id| Some(*id) != root_transform)
+        .min()
         .or(spine_root_transform);
     let bg_transform = transform_by_go_name(&game_objects, &format!("bg_{stem}"))
         .or_else(|| transform_by_go_name(&game_objects, "BG"));
@@ -963,9 +967,10 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
 
 fn transform_by_go_name(game_objects: &HashMap<i64, DumpGameObject>, name: &str) -> Option<i64> {
     game_objects
-        .values()
-        .find(|go| go.name == name)
-        .map(|go| go.transform_id)
+        .iter()
+        .filter(|(_, go)| go.name == name)
+        .map(|(id, _)| *id)
+        .min()
 }
 
 fn transform_by_go_prefix(
@@ -973,9 +978,10 @@ fn transform_by_go_prefix(
     prefix: &str,
 ) -> Option<i64> {
     game_objects
-        .values()
-        .find(|go| go.name.starts_with(prefix))
-        .map(|go| go.transform_id)
+        .iter()
+        .filter(|(_, go)| go.name.starts_with(prefix))
+        .map(|(id, _)| *id)
+        .min()
 }
 
 fn add_transform_node(
@@ -1036,8 +1042,12 @@ fn build_layout_debug(
     let root_transform = transform_by_go_name(game_objects, stem);
     let character_transform = transform_by_go_name(game_objects, "Character");
     let spine_root_transform = transform_by_go_name(game_objects, &format!("spine_{stem}"));
-    let spine_object_transform = transform_by_go_prefix(game_objects, "Spine GameObject")
+    let spine_object_transform = game_objects
+        .iter()
+        .filter(|(_, go)| go.name.starts_with("Spine GameObject"))
+        .map(|(id, _)| *id)
         .filter(|id| Some(*id) != root_transform)
+        .min()
         .or(spine_root_transform);
     let bg_transform = transform_by_go_name(game_objects, &format!("bg_{stem}"))
         .or_else(|| transform_by_go_name(game_objects, "BG"));
@@ -1442,7 +1452,7 @@ fn build_config(
                 .collect();
             ("home".to_string(), primary_name, names, vp, vf)
         }
-        None => ("home".to_string(), None, HashMap::new(), None, vec![]),
+        None => ("home".to_string(), None, BTreeMap::new(), None, vec![]),
     };
 
     let tap_animations: Vec<String> = leader_skin
@@ -1504,7 +1514,7 @@ fn build_config(
 
     let home_position = hi_id.and_then(|id| meta.home_positions.get(&id).copied());
 
-    let mut aspect_layouts = HashMap::new();
+    let mut aspect_layouts = BTreeMap::new();
     if let Some(t) = transform {
         if let Some(defines) = t.get("_aspectDefines").and_then(|v| v.as_array()) {
             for def in defines {
