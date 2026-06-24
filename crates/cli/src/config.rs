@@ -20,14 +20,12 @@ pub struct AppConfig {
     pub device_uuid: String,
     pub md5_salt: String,
     pub asset_bundle_base_keys: String,
-    /// vgmstream-cli.exe 完整路径
-    #[serde(default = "default_vgmstream_path")]
+    /// vgmstream-cli 完整路径
     pub vgmstream_path: String,
-    /// ffmpeg.exe 完整路径（留空则用 PATH 中的 ffmpeg）
+    /// ffmpeg 完整路径（留空则用 PATH 中的 ffmpeg）
     #[serde(default = "default_ffmpeg_path")]
     pub ffmpeg_path: String,
-    /// AssetStudioModCLI.exe 完整路径
-    #[serde(default = "default_asset_studio_path")]
+    /// AssetStudioModCLI 完整路径
     pub asset_studio_path: String,
     pub client_id: i64,
     pub sqlite3mc_key: String,
@@ -38,16 +36,8 @@ fn default_data_dir() -> String {
     "data".into()
 }
 
-fn default_vgmstream_path() -> String {
-    r"D:\Tools\vgmstream-win64\vgmstream-cli.exe".into()
-}
-
 fn default_ffmpeg_path() -> String {
     "ffmpeg".into()
-}
-
-fn default_asset_studio_path() -> String {
-    r"D:\Tools\AssetStudioModCLI_net9_win64\AssetStudioModCLI.exe".into()
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,9 +1,9 @@
 # 数据根目录
 data_dir = "D:/WBUnpacker"
 
-# 可选，默认 D:\Tools\vgmstream-win64\vgmstream-cli.exe
-vgmstream_path = "D:/Tools/vgmstream-win64/vgmstream-cli.exe"
-# 可选，默认用 PATH 中的 ffmpeg  
+# vgmstream-cli 路径（必填）
+vgmstream_path = "vgmstream-cli"
+# ffmpeg 路径（可选，留空则用 PATH 中的 ffmpeg）
 ffmpeg_path = "ffmpeg"
 
 # wbunpacker 配置文件
@@ -35,6 +35,11 @@ asset_bundle_base_keys = ""
 sqlite3mc_key = ""
 sqlite3mc_base_key = ""
 
+# AssetStudioModCLI 路径（必填）
+# Windows: D:/Tools/AssetStudioModCLI_net9_win64/AssetStudioModCLI.exe
+# Linux:   ~/.local/bin/AssetStudioModCLI
+asset_studio_path = ""
+
 [device_info]
 platform = 4
 device = 3
@@ -43,6 +48,3 @@ platform_os_version = ""
 gpu_vendor = ""
 graphics_memory_mb = ""
 processor_type = ""
-
-# AssetStudioModCLI 路径
-asset_studio_path = "D:/Tools/AssetStudioModCLI_net9_win64/AssetStudioModCLI.exe"
