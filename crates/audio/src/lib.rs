@@ -25,7 +25,7 @@
 
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 
 pub mod card_voices;

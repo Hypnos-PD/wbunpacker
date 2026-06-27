@@ -195,7 +195,7 @@ pub fn parse(raw: &[u8]) -> anyhow::Result<Manifest> {
     );
 
     // 解析顶层 msgpack map (TOC)，记录 TOC 结束位置
-    let mut cursor = &msgpack_body[..];
+    let mut cursor = msgpack_body;
     let root = rmpv::decode::value::read_value(&mut cursor).with_context(|| "msgpack 解码失败")?;
     let toc_end = msgpack_body.len() - cursor.len();
     debug!("TOC 结束位置: {}", toc_end);
