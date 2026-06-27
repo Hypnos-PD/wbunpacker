@@ -40,13 +40,15 @@ pub struct ExportResult {
 /// 返回 (toc_end, tables)：
 /// - toc_end: TOC msgpack 体结束的字节位置
 /// - tables: 表名到 (offset, length) 的映射（offset 相对于 toc_end）
-pub fn parse_toc(raw: &[u8]) -> anyhow::Result<(usize, BTreeMap<String, (usize, usize)>)> {
+pub type Toc = (usize, BTreeMap<String, (usize, usize)>);
+
+pub fn parse_toc(raw: &[u8]) -> anyhow::Result<Toc> {
     if raw.len() < 16 {
         return Err(anyhow!("数据太短: {} 字节", raw.len()));
     }
 
     let body = &raw[..raw.len() - 16];
-    let mut cursor = &body[..];
+    let mut cursor = body;
     let root =
         rmpv::decode::value::read_value(&mut cursor).with_context(|| "TOC msgpack 解码失败")?;
     let toc_end = body.len() - cursor.len();
@@ -192,7 +194,7 @@ pub fn export_all(raw: &[u8], output_dir: &Path) -> anyhow::Result<Vec<ExportRes
 
     for (name, (off, len)) in &tables {
         let rows = extract_table(raw, toc_end, *off, *len, name)?;
-        let json_rows: Vec<serde_json::Value> = rows.iter().map(|r| to_json_value(r)).collect();
+        let json_rows: Vec<serde_json::Value> = rows.iter().map(to_json_value).collect();
 
         let json = serde_json::to_string_pretty(&json_rows)
             .with_context(|| format!("表 '{}' JSON 序列化失败", name))?;
@@ -443,9 +445,9 @@ pub fn generate_pack_names(
             let key = r[0].as_str().unwrap_or("");
             let val = r[1].as_str().unwrap_or("");
 
-            if let Some(pack_id) = key.strip_prefix("CPN_") {
-                if let Ok(id_num) = pack_id.parse::<u32>() {
-                    if id_num >= 10000 && id_num <= 10007 {
+            if let Some(pack_id) = key.strip_prefix("CPN_")
+                && let Ok(id_num) = pack_id.parse::<u32>()
+                    && (10000..=10007).contains(&id_num) {
                         let entry = pack_names
                             .entry(pack_id.to_string())
                             .or_insert_with(|| serde_json::json!({}));
@@ -454,8 +456,6 @@ pub fn generate_pack_names(
                             obj.insert(lang_key.to_string(), serde_json::Value::String(clean));
                         }
                     }
-                }
-            }
         }
     }
 

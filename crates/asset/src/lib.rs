@@ -9,14 +9,14 @@
 //!
 //! 采用 blob + 硬链接 双层存储：
 //!
-//! `	ext
+//! ```text
 //! blobs/raw/{hash[..2]}/{hash}          ← 下载的加密文件（按 hash 存，天然去重）
 //! blobs/decrypted/{hash[..2]}/{hash}     ← 解密后的文件
 //!
-//! variants/{variant}/raw/{name}           ← ──硬链接→ blobs/raw/...
-//! variants/{variant}/decrypted/{name}.ab  ← ──硬链接→ blobs/decrypted/...
-//! variants/{variant}/raw-assets/{name}    ← ──硬链接→ blobs/raw/...
-//! `
+//! variants/{variant}/raw/{name}           ← 硬链接 → blobs/raw/...
+//! variants/{variant}/decrypted/{name}.ab  ← 硬链接 → blobs/decrypted/...
+//! variants/{variant}/raw-assets/{name}    ← 硬链接 → blobs/raw/...
+//! ```
 //!
 //! 游戏更新时同名文件 hash/checksum 变化 → 新 blob 自动下载，
 //! 旧 blob 保留不删，硬链接自动更新指向新 blob。
@@ -86,11 +86,11 @@ impl<R: Read + Seek> AssetBundleDecryptor<R> {
             }
         }
 
-        for i in decrypt_offset..bytes_read {
-            let abs_pos = read_start + i as u64;
+        for (i, byte) in buf[decrypt_offset..bytes_read].iter_mut().enumerate() {
+            let abs_pos = read_start + (decrypt_offset + i) as u64;
             if abs_pos >= HEADER_SKIP_BYTES {
                 let key_idx = (abs_pos as usize) % self.keystream.len();
-                buf[i] ^= self.keystream[key_idx];
+                *byte ^= self.keystream[key_idx];
             }
         }
 
@@ -138,16 +138,15 @@ pub fn blob_path(blobs_dir: &Path, category: &str, hash: &str) -> std::path::Pat
 
 /// 创建硬链接。
 ///
-/// - 目标不存在 → 创建链接，返回 	rue
-/// - 目标存在且文件大小与源一致 → 跳过，返回 alse
-/// - 目标存在但大小不一致（游戏更新导致内容变化）→ 删除旧链接后重建，返回 	rue
+/// - 目标不存在 → 创建链接，返回 true
+/// - 目标存在且文件大小与源一致 → 跳过，返回 false
+/// - 目标存在但大小不一致（游戏更新导致内容变化）→ 删除旧链接后重建，返回 true
 pub fn hardlink_or_skip(src: &Path, dst: &Path) -> std::io::Result<bool> {
     if dst.exists() {
-        if let (Ok(s_meta), Ok(d_meta)) = (std::fs::metadata(src), std::fs::metadata(dst)) {
-            if s_meta.len() == d_meta.len() {
+        if let (Ok(s_meta), Ok(d_meta)) = (std::fs::metadata(src), std::fs::metadata(dst))
+            && s_meta.len() == d_meta.len() {
                 return Ok(false);
             }
-        }
         std::fs::remove_file(dst)?;
     }
     if let Some(parent) = dst.parent() {
@@ -330,20 +329,18 @@ pub async fn batch_download(
         let s = skipped.clone();
         let f = failed.clone();
         let db = dl_bytes.clone();
-        let hl = hardlinks.clone();
+        let _hl = hardlinks.clone();
         let pb = pb.clone();
 
         tasks.push(tokio::spawn(async move {
             // 跳过判断：size 预筛 + CRC64 精确校验
             if link_dec.exists()
                 && std::fs::metadata(&link_dec).map(|m| m.len()).unwrap_or(0) == asset_size
-            {
-                if crc64_file(&link_dec).ok() == Some(checksum) {
+                && crc64_file(&link_dec).ok() == Some(checksum) {
                     s.fetch_add(1, Ordering::Relaxed);
                     pb.inc(1);
                     return;
                 }
-            }
 
             let _permit = sem.acquire().await.unwrap();
             pb.set_message(name.clone());
@@ -398,7 +395,7 @@ pub async fn batch_download(
         let s = skipped.clone();
         let f = failed.clone();
         let db = dl_bytes.clone();
-        let hl = hardlinks.clone();
+        let _hl = hardlinks.clone();
         let pb = pb.clone();
 
         tasks.push(tokio::spawn(async move {

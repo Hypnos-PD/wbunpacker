@@ -232,6 +232,7 @@ pub fn render_all_card_images(
 }
 
 /// 使用自定义资源渲染卡牌（不依赖 master data）。
+#[allow(clippy::too_many_arguments)]
 pub fn render_custom_card(
     data_dir: &Path,
     image_path: &Path,
@@ -412,6 +413,7 @@ pub fn render_custom_card(
 
 /// 以 card_id 读取 master data 为底，用命令行参数覆盖任意字段后渲染。
 /// 只要传了 --res 就输出到 Custom/ 目录。
+#[allow(clippy::too_many_arguments)]
 pub fn render_card_with_overrides(
     data_dir: &Path,
     card_id: i64,
@@ -617,7 +619,7 @@ fn count_raw_dirs(raw_dir: &Path) -> usize {
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
                 .count()
         })
         .unwrap_or(0)
@@ -637,9 +639,9 @@ fn count_pngs_recursive(dir: &Path) -> usize {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if entry.file_type().map_or(false, |t| t.is_dir()) {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 count += count_pngs_recursive(&path);
-            } else if path.extension().map_or(false, |e| e == "png") {
+            } else if path.extension().is_some_and(|e| e == "png") {
                 count += 1;
             }
         }
@@ -737,7 +739,7 @@ fn categorize(raw_dir: &Path, output_dir: &Path) -> anyhow::Result<CategorizeRes
     // 收集所有待处理的目录
     let dirs: Vec<_> = std::fs::read_dir(raw_dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .collect();
 
     let pb = ProgressBar::new(dirs.len() as u64);
@@ -775,13 +777,12 @@ fn categorize(raw_dir: &Path, output_dir: &Path) -> anyhow::Result<CategorizeRes
         }
 
         // 递归查找 PNG 并移动
-        if let Ok(pngs) = find_pngs(&entry.path()) {
-            if let Some(png_path) = pngs.first() {
-                pb.set_message(format!("{}", resource_id));
+        if let Ok(pngs) = find_pngs(&entry.path())
+            && let Some(png_path) = pngs.first() {
+                pb.set_message(resource_id.to_string());
                 std::fs::rename(png_path, &dest)?;
                 result.png_count += 1;
             }
-        }
         pb.inc(1);
     }
 
@@ -802,7 +803,7 @@ fn find_pngs(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
         let path = entry.path();
         if entry.file_type()?.is_dir() {
             result.extend(find_pngs(&path)?);
-        } else if path.extension().map_or(false, |e| e == "png") {
+        } else if path.extension().is_some_and(|e| e == "png") {
             result.push(path);
         }
     }
@@ -1069,12 +1070,11 @@ fn extract_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Resu
 
         // AssetStudio 输出: .temp_output/{bundle_name}.ab_export/CAB-{hash}/{texture_name}.png
         let export_dir = temp_output.join(format!("{}_export", name));
-        if let Ok(pngs) = find_pngs(&export_dir) {
-            if let Some(png_path) = pngs.first() {
+        if let Ok(pngs) = find_pngs(&export_dir)
+            && let Some(png_path) = pngs.first() {
                 std::fs::rename(png_path, &dest)?;
                 debug!("pack-icons 图标更新: {} → {}", id, dest.display());
             }
-        }
     }
 
     // 清理临时目录
@@ -1163,12 +1163,11 @@ fn extract_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Res
         let file_name = src.file_name().unwrap().to_string_lossy().to_string();
         let id = file_name.strip_suffix(".ab").unwrap_or(&file_name);
         let export_dir = temp_output.join(format!("{}_export", file_name));
-        if let Ok(pngs) = find_pngs(&export_dir) {
-            if let Some(png_path) = pngs.first() {
+        if let Ok(pngs) = find_pngs(&export_dir)
+            && let Some(png_path) = pngs.first() {
                 std::fs::rename(png_path, output_dir.join(format!("{id}.png")))?;
                 exported += 1;
             }
-        }
     }
 
     let _ = std::fs::remove_dir_all(&temp_input);
@@ -1455,13 +1454,12 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
 
         let dest = output_dir.join(format!("{}.png", id));
         let export_dir = temp_output.join(format!("{}_export", name));
-        if let Ok(pngs) = find_pngs(&export_dir) {
-            if let Some(png_path) = pngs.first() {
+        if let Ok(pngs) = find_pngs(&export_dir)
+            && let Some(png_path) = pngs.first() {
                 std::fs::rename(png_path, &dest)?;
                 exported += 1;
                 debug!("徽章更新: {} -> {}", id, dest.display());
             }
-        }
     }
 
     // 清理
@@ -1649,13 +1647,12 @@ fn extract_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> a
 
         let dest = output_dir.join(format!("{}.png", id));
         let export_dir = temp_output.join(format!("{}_export", name));
-        if let Ok(pngs) = find_pngs(&export_dir) {
-            if let Some(png_path) = pngs.first() {
+        if let Ok(pngs) = find_pngs(&export_dir)
+            && let Some(png_path) = pngs.first() {
                 std::fs::rename(png_path, &dest)?;
                 exported += 1;
                 debug!("贴图更新: {} -> {}", id, dest.display());
             }
-        }
     }
 
     let _ = std::fs::remove_dir_all(&temp_input);
@@ -1787,13 +1784,12 @@ fn extract_home_illust_picts(data_dir: &Path, asset_studio_path: &Path) -> anyho
         let bundle_name = format!("utx_pict_Illustration_{id}.ab");
         let export_dir = temp_output.join(format!("{bundle_name}_export"));
         let dest = output_dir.join(format!("hi_{id}.png"));
-        if let Ok(pngs) = find_pngs(&export_dir) {
-            if let Some(png_path) = pngs.first() {
+        if let Ok(pngs) = find_pngs(&export_dir)
+            && let Some(png_path) = pngs.first() {
                 std::fs::rename(png_path, &dest)?;
                 exported += 1;
                 debug!("Home Illustration pict 更新: {} -> {}", id, dest.display());
             }
-        }
     }
 
     let _ = std::fs::remove_dir_all(&temp_input);
@@ -1860,6 +1856,7 @@ pub struct RenderStats {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
 struct CardRenderEntry {
     card_id: i64,
     card_style_id: i64,

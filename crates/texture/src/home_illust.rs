@@ -444,6 +444,7 @@ fn is_battle_background(hi_id: i64) -> bool {
 }
 
 /// 战斗背景 hi_id → leader_skin_id 映射
+#[allow(dead_code)]
 fn battle_to_leader_id(hi_id: i64) -> Option<i64> {
     match hi_id {
         2001..=2008 => Some(hi_id - 900), // 200x → 110x
@@ -562,12 +563,8 @@ fn extract_one(
             spine_png = Some(file.clone());
         } else if name.ends_with(".png") && name.starts_with("bg_hi_") {
             bg_candidates.push((name.clone(), file.clone()));
-        } else if name.ends_with(".png") && name.starts_with("ef_") {
-            has_effects = true;
-            fs::create_dir_all(&fx_dir)?;
-            fs::copy(file, fx_dir.join(&name))?;
         } else if name.ends_with(".png")
-            && (name.starts_with("sp_") || name.starts_with("tex_eff_"))
+            && (name.starts_with("ef_") || name.starts_with("sp_") || name.starts_with("tex_eff_"))
         {
             has_effects = true;
             fs::create_dir_all(&fx_dir)?;
@@ -815,6 +812,7 @@ fn copy_atlas_with_page_name(
 }
 
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 struct DumpGameObject {
     name: String,
     transform_id: i64,
@@ -895,8 +893,8 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
         .filter(|(_, go)| go.name == stem)
         .map(|(id, _)| *id)
         .min();
-    let character_transform = transform_by_go_name(&game_objects, "Character");
-    let spine_root_transform = transform_by_go_name(&game_objects, &format!("spine_{stem}"));
+    let character_transform = transform_by_go_name(game_objects, "Character");
+    let spine_root_transform = transform_by_go_name(game_objects, &format!("spine_{stem}"));
     let spine_object_transform = game_objects
         .iter()
         .filter(|(_, go)| go.name.starts_with("Spine GameObject"))
@@ -904,59 +902,58 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
         .filter(|id| Some(*id) != root_transform)
         .min()
         .or(spine_root_transform);
-    let bg_transform = transform_by_go_name(&game_objects, &format!("bg_{stem}"))
-        .or_else(|| transform_by_go_name(&game_objects, "BG"));
+    let bg_transform = transform_by_go_name(game_objects, &format!("bg_{stem}"))
+        .or_else(|| transform_by_go_name(game_objects, "BG"));
 
     add_transform_node(
         "root",
         root_transform,
-        &game_objects,
-        &transforms,
+        game_objects,
+        transforms,
         &mut nodes,
     );
     add_transform_node(
         "character",
         character_transform,
-        &game_objects,
-        &transforms,
+        game_objects,
+        transforms,
         &mut nodes,
     );
     add_transform_node(
         "spineRoot",
         spine_root_transform,
-        &game_objects,
-        &transforms,
+        game_objects,
+        transforms,
         &mut nodes,
     );
     add_transform_node(
         "spineObject",
         spine_object_transform,
-        &game_objects,
-        &transforms,
+        game_objects,
+        transforms,
         &mut nodes,
     );
     add_transform_node(
         "background",
         bg_transform,
-        &game_objects,
-        &transforms,
+        game_objects,
+        transforms,
         &mut nodes,
     );
-    if let Some(bg) = bg_transform.and_then(|id| transforms.get(&id)) {
-        if let Some(child_id) = bg.children.first().copied() {
+    if let Some(bg) = bg_transform.and_then(|id| transforms.get(&id))
+        && let Some(child_id) = bg.children.first().copied() {
             add_transform_node(
                 "backgroundQuad",
                 Some(child_id),
-                &game_objects,
-                &transforms,
+                game_objects,
+                transforms,
                 &mut nodes,
             );
         }
-    }
 
     let prefab_scale = spine_object_transform
-        .map(|id| world_scale(id, &transforms).x)
-        .or_else(|| spine_root_transform.map(|id| world_scale(id, &transforms).x))
+        .map(|id| world_scale(id, transforms).x)
+        .or_else(|| spine_root_transform.map(|id| world_scale(id, transforms).x))
         .unwrap_or(1.0);
 
     PrefabTransforms {
@@ -973,6 +970,7 @@ fn transform_by_go_name(game_objects: &HashMap<i64, DumpGameObject>, name: &str)
         .min()
 }
 
+#[allow(dead_code)]
 fn transform_by_go_prefix(
     game_objects: &HashMap<i64, DumpGameObject>,
     prefix: &str,
@@ -1402,6 +1400,7 @@ fn extract_home_voice_pck(
     Ok(total)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_config(
     stem: &str,
     source_hash: String,
@@ -1515,8 +1514,8 @@ fn build_config(
     let home_position = hi_id.and_then(|id| meta.home_positions.get(&id).copied());
 
     let mut aspect_layouts = BTreeMap::new();
-    if let Some(t) = transform {
-        if let Some(defines) = t.get("_aspectDefines").and_then(|v| v.as_array()) {
+    if let Some(t) = transform
+        && let Some(defines) = t.get("_aspectDefines").and_then(|v| v.as_array()) {
             for def in defines {
                 let aspect = def.get("_aspect").and_then(|v| v.as_f64()).unwrap_or(1.78);
                 let pos = def.get("_localPosition").unwrap();
@@ -1533,7 +1532,6 @@ fn build_config(
                 );
             }
         }
-    }
 
     IllustConfig {
         config_version: HOME_ILLUST_CONFIG_VERSION,
