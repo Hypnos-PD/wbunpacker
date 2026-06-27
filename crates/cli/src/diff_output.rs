@@ -50,7 +50,7 @@ pub fn build_diff_output_dir(
     let new_sanitized = sanitize_label(new_label);
 
     let timestamp_segment =
-        if old_time.len() >= 15 && new_time.len() >= 15 && &old_time[..8] == &new_time[..8] {
+        if old_time.len() >= 15 && new_time.len() >= 15 && old_time[..8] == new_time[..8] {
             // Same date: extract common date + individual HHMMSS parts.
             // old_time and new_time are "YYYYMMDD-HHMMSS" (15 chars).
             let date = &old_time[..8];
