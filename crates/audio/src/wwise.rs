@@ -116,11 +116,14 @@ pub fn decrypt_wwise_event_table(data: &[u8]) -> anyhow::Result<BTreeMap<u32, St
 /// Wwise SoundBank chunk ID（大端序）。对照 W2AU Python 版 `CHUNK_IDS`。
 mod chunk_id {
     pub const BKHD: u32 = 0x424B4844;
+    #[allow(dead_code)]
     pub const DIDX: u32 = 0x44494458;
+    #[allow(dead_code)]
     pub const DATA: u32 = 0x44415441;
     pub const HIRC: u32 = 0x48495243;
     pub const STID: u32 = 0x53544944;
 
+    #[allow(dead_code)]
     pub const ALL: &[u32] = &[
         0x424B4844, // BKHD
         0x44494458, // DIDX
@@ -295,12 +298,12 @@ pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
                     sound_to_action.insert(sound_id, action_id);
                 }
             }
-            0x04 => {
+            0x04
                 // CAkEvent (v154):
                 //   [0..4): ulID / event_id (u32)
                 //   [4..):  var(ulActionListSize) + action_ids (u32 each)
-                if data_len >= 4 {
-                    let event_id = read_u32_le(&bank_data[data_start..]);
+                if data_len >= 4 => {
+                    let _event_id = read_u32_le(&bank_data[data_start..]);
                     // 读取 var 编码的 action 列表长度
                     let (action_count, var_bytes) = read_var_u32(&bank_data[data_start + 4..]);
                     let list_start = data_start + 4 + var_bytes;
@@ -312,7 +315,6 @@ pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
                         }
                     }
                 }
-            }
             _ => {}
         }
 
@@ -322,11 +324,10 @@ pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
     // 组装映射链: wem_id → sound_id → action_id → event_id
     let mut result = BTreeMap::new();
     for (wem_id, sound_id) in &wem_to_sound {
-        if let Some(action_id) = sound_to_action.get(sound_id) {
-            if let Some(event_id) = action_to_event.get(action_id) {
+        if let Some(action_id) = sound_to_action.get(sound_id)
+            && let Some(event_id) = action_to_event.get(action_id) {
                 result.insert(*wem_id, *event_id);
             }
-        }
     }
 
     result
@@ -341,8 +342,10 @@ fn read_u32_le(data: &[u8]) -> u32 {
 }
 
 /// Wwise 可变长度整数编码（对照 wwiser TYPE_VAR）：
+///
 /// - 读 u8，取低 7 位
 /// - 若高位为 1，继续读下一个 u8，value = (value << 7) | (next & 0x7F)
+///
 /// 返回 (解码值, 消耗字节数)
 fn read_var_u32(data: &[u8]) -> (u32, usize) {
     let mut value = 0u32;
@@ -387,15 +390,9 @@ pub fn build_global_wem_mapping(
     let mut sound_to_action: BTreeMap<u32, u32> = BTreeMap::new();
     let mut action_to_event: BTreeMap<u32, u32> = BTreeMap::new();
 
-    let mut total_banks = 0usize;
-    let mut banks_with_hirc = 0usize;
     for (_pck_path, pck_data) in pck_data_list {
         let banks = extract_banks_from_pck(pck_data);
-        total_banks += banks.len();
         for bank in &banks {
-            if find_chunk(bank, chunk_id::HIRC).is_some() {
-                banks_with_hirc += 1;
-            }
             collect_hirc_mappings(
                 bank,
                 &mut wem_to_sound,
@@ -409,13 +406,11 @@ pub fn build_global_wem_mapping(
     // 全局关联: wem_id → sound_id → action_id → event_id → event_name
     let mut result = BTreeMap::new();
     for (wem_id, sound_id) in &wem_to_sound {
-        if let Some(action_id) = sound_to_action.get(sound_id) {
-            if let Some(event_id) = action_to_event.get(action_id) {
-                if let Some(name) = event_table.get(event_id) {
+        if let Some(action_id) = sound_to_action.get(sound_id)
+            && let Some(event_id) = action_to_event.get(action_id)
+                && let Some(name) = event_table.get(event_id) {
                     result.insert(*wem_id, name.clone());
                 }
-            }
-        }
     }
 
     tracing::info!(
@@ -513,9 +508,9 @@ pub fn collect_hirc_mappings(
                     }
                 }
             }
-            0x04 => {
+            0x04
                 // CAkEvent: type_data 以 var(ulActionListSize) 开头，后跟 ulActionID[]
-                if data_len >= 1 {
+                if data_len >= 1 => {
                     let (action_count, var_bytes) = read_var_u32(&bank_data[data_start..]);
                     if action_count > 0 {
                         let list_start = data_start + var_bytes;
@@ -530,7 +525,6 @@ pub fn collect_hirc_mappings(
                         }
                     }
                 }
-            }
             _ => {}
         }
 

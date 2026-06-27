@@ -7,7 +7,7 @@
 //! - 动态 slot 名（play_pair_10721110 而非坍缩的 play_pair）
 //! - 多 pair/cross/token/skill 变体
 //! - 增量：复用已有 WAV → 跳过 pck 解包
-//! //!
+//!
 //! # 管线
 //!
 //! ```text
@@ -38,7 +38,7 @@
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::{extract_wem, parse_akpk, wav_to_mp3, wem_to_wav};
 
@@ -421,7 +421,7 @@ pub fn extract_card_voices(
         let mut lang_cards: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
         for (prefix, slots) in &voice_map {
-            pb.set_message(format!("{}", prefix));
+            pb.set_message(prefix.to_string());
 
             let pck_path = pck_dir.join(format!("dx_{}.pck", prefix));
             if !pck_path.exists() {
@@ -495,6 +495,7 @@ pub fn extract_card_voices(
 ///
 /// 优先复用 `audio_wav_dir` 中已有的 WAV（避免重复解码），
 /// 不存在时才回退到 pck 解包 + vgmstream。
+#[allow(clippy::too_many_arguments)]
 fn process_card_pck(
     pck_path: &Path,
     slots: &BTreeMap<String, Vec<String>>,
@@ -534,13 +535,11 @@ fn process_card_pck(
 
     let mut wem_to_name: BTreeMap<u32, String> = BTreeMap::new();
     for (wem_id, sound_id) in &wem_to_sound {
-        if let Some(action_id) = sound_to_action.get(sound_id) {
-            if let Some(event_id) = action_to_event.get(action_id) {
-                if let Some(name) = event_table.get(event_id) {
+        if let Some(action_id) = sound_to_action.get(sound_id)
+            && let Some(event_id) = action_to_event.get(action_id)
+                && let Some(name) = event_table.get(event_id) {
                     wem_to_name.insert(*wem_id, name.clone());
                 }
-            }
-        }
     }
 
     // 反转：event_name → [wem_id]
@@ -661,20 +660,23 @@ fn process_card_pck(
 /// - `1_mode2` → `play_mode2`
 fn classify_play_suffix(suffix: &str) -> String {
     // 优先匹配带 ID 的动态后缀
-    if suffix.starts_with("9_") {
-        return format!("play_pair_{}", &suffix[2..]);
+    if let Some(rest) = suffix.strip_prefix("9_") {
+        return format!("play_pair_{rest}");
     }
-    if suffix.starts_with("7_") {
-        return format!("play_cross_{}", &suffix[2..]);
+    if let Some(rest) = suffix.strip_prefix("7_") {
+        return format!("play_cross_{rest}");
     }
-    if suffix.starts_with("8_") || suffix.starts_with("11_") {
-        return format!("play_token_{}", &suffix[2..]);
+    if let Some(rest) = suffix.strip_prefix("8_") {
+        return format!("play_token_{rest}");
     }
-    if suffix.starts_with("1_skill_") {
-        return format!("play_skill_{}", &suffix[8..]);
+    if let Some(rest) = suffix.strip_prefix("11_") {
+        return format!("play_token_{rest}");
     }
-    if suffix.starts_with("1_mode") {
-        return format!("play_mode{}", &suffix[6..]);
+    if let Some(rest) = suffix.strip_prefix("1_skill_") {
+        return format!("play_skill_{rest}");
+    }
+    if let Some(rest) = suffix.strip_prefix("1_mode") {
+        return format!("play_mode{rest}");
     }
 
     // 静态规则
@@ -688,8 +690,8 @@ fn classify_play_suffix(suffix: &str) -> String {
 
 /// 分类 Act 事件的后缀 → slot 名。
 fn classify_act_suffix(suffix: &str) -> String {
-    if suffix.starts_with("10_mode") {
-        return format!("act_mode{}", &suffix[7..]);
+    if let Some(rest) = suffix.strip_prefix("10_mode") {
+        return format!("act_mode{rest}");
     }
     "act".to_string()
 }
