@@ -14,7 +14,7 @@
 //!    因为最后一张表可能延伸进 MD5 区域）
 //! 4. 表数据：直接 msgpack 数组（小表）或 Ext(99) LZ4 压缩（大表）
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use rmpv::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,13 +47,11 @@ pub fn parse_toc(raw: &[u8]) -> anyhow::Result<(usize, BTreeMap<String, (usize, 
 
     let body = &raw[..raw.len() - 16];
     let mut cursor = &body[..];
-    let root = rmpv::decode::value::read_value(&mut cursor)
-        .with_context(|| "TOC msgpack 解码失败")?;
+    let root =
+        rmpv::decode::value::read_value(&mut cursor).with_context(|| "TOC msgpack 解码失败")?;
     let toc_end = body.len() - cursor.len();
 
-    let map = root
-        .as_map()
-        .ok_or_else(|| anyhow!("TOC 根结构不是 map"))?;
+    let map = root.as_map().ok_or_else(|| anyhow!("TOC 根结构不是 map"))?;
 
     let mut tables = BTreeMap::new();
     for (k, v) in map {
@@ -93,9 +91,15 @@ pub fn extract_table(
     name: &str,
 ) -> anyhow::Result<Vec<Value>> {
     let actual = toc_end + off;
-    let table_data = raw
-        .get(actual..actual + len)
-        .ok_or_else(|| anyhow!("表 '{}' 偏移越界: {} + {} > {}", name, actual, len, raw.len()))?;
+    let table_data = raw.get(actual..actual + len).ok_or_else(|| {
+        anyhow!(
+            "表 '{}' 偏移越界: {} + {} > {}",
+            name,
+            actual,
+            len,
+            raw.len()
+        )
+    })?;
 
     let value = rmpv::decode::value::read_value(&mut &table_data[..])
         .with_context(|| format!("表 '{}' msgpack 解码失败", name))?;
@@ -145,16 +149,14 @@ fn to_json_value(v: &Value) -> serde_json::Value {
         Value::F64(f) => serde_json::json!(*f),
         Value::String(s) => match s.as_str() {
             Some(utf8) => serde_json::Value::String(utf8.to_string()),
-            None => serde_json::Value::String(
-                String::from_utf8_lossy(s.as_bytes()).into_owned(),
-            ),
+            None => serde_json::Value::String(String::from_utf8_lossy(s.as_bytes()).into_owned()),
         },
         Value::Binary(b) => serde_json::Value::Array(
-            b.iter().map(|&x| serde_json::Value::Number(x.into())).collect(),
+            b.iter()
+                .map(|&x| serde_json::Value::Number(x.into()))
+                .collect(),
         ),
-        Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(to_json_value).collect())
-        }
+        Value::Array(arr) => serde_json::Value::Array(arr.iter().map(to_json_value).collect()),
         Value::Map(map) => {
             let obj: serde_json::Map<String, serde_json::Value> = map
                 .iter()
@@ -163,7 +165,9 @@ fn to_json_value(v: &Value) -> serde_json::Value {
             serde_json::Value::Object(obj)
         }
         Value::Ext(_, data) => serde_json::Value::Array(
-            data.iter().map(|&x| serde_json::Value::Number(x.into())).collect(),
+            data.iter()
+                .map(|&x| serde_json::Value::Number(x.into()))
+                .collect(),
         ),
     }
 }
@@ -194,8 +198,7 @@ pub fn export_all(raw: &[u8], output_dir: &Path) -> anyhow::Result<Vec<ExportRes
             .with_context(|| format!("表 '{}' JSON 序列化失败", name))?;
 
         let path = output_dir.join(format!("{}.json", name));
-        std::fs::write(&path, json)
-            .with_context(|| format!("无法写入: {}", path.display()))?;
+        std::fs::write(&path, json).with_context(|| format!("无法写入: {}", path.display()))?;
 
         tracing::debug!("  {}: {} 行", name, rows.len());
         results.push(ExportResult {
@@ -207,7 +210,6 @@ pub fn export_all(raw: &[u8], output_dir: &Path) -> anyhow::Result<Vec<ExportRes
 
     Ok(results)
 }
-
 
 // ---------------------------------------------------------------------------
 // cards_full.json 生成
@@ -260,10 +262,7 @@ struct TextKeys {
 /// # 参数
 /// - `master_data_dir`: exports/master-data/ 目录（下面有 Chs/ Eng/ Jpn/ Kor/ Cht/ 子目录）
 /// - `output_path`: cards_full.json 输出路径
-pub fn generate_cards_full(
-    master_data_dir: &Path,
-    output_path: &Path,
-) -> anyhow::Result<usize> {
+pub fn generate_cards_full(master_data_dir: &Path, output_path: &Path) -> anyhow::Result<usize> {
     use std::collections::HashMap;
 
     // 读取核心表（全部从 Chs 读，结构各变体一致）
@@ -274,10 +273,12 @@ pub fn generate_cards_full(
     let skill_master: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "SkillMaster.json")?;
 
     // 建立索引
-    let bcm_by_id: HashMap<i64, &Vec<serde_json::Value>> = base_card.iter()
+    let bcm_by_id: HashMap<i64, &Vec<serde_json::Value>> = base_card
+        .iter()
         .filter_map(|r| r[0].as_i64().map(|id| (id, r)))
         .collect();
-    let ct_by_cs: HashMap<i64, &Vec<serde_json::Value>> = card_text.iter()
+    let ct_by_cs: HashMap<i64, &Vec<serde_json::Value>> = card_text
+        .iter()
         .filter_map(|r| r[0].as_i64().map(|id| (id, r)))
         .collect();
     let skills_by_cid: HashMap<i64, Vec<&Vec<serde_json::Value>>> = {
@@ -294,21 +295,23 @@ pub fn generate_cards_full(
     let langs = ["Chs", "Eng", "Jpn", "Kor", "Cht"];
     let mut mtl_all: HashMap<String, HashMap<String, String>> = HashMap::new();
     for lang in &langs {
-        let mtl: Vec<Vec<serde_json::Value>> = read_json_table(
-            &master_data_dir.join(lang), "MasterTextLabel.json"
-        )?;
+        let mtl: Vec<Vec<serde_json::Value>> =
+            read_json_table(&master_data_dir.join(lang), "MasterTextLabel.json")?;
         let mut map = HashMap::new();
         for r in &mtl {
             let key = r[0].as_str().unwrap_or("").to_string();
             let val = r[1].as_str().unwrap_or("").to_string();
-            if !key.is_empty() { map.insert(key, val); }
+            if !key.is_empty() {
+                map.insert(key, val);
+            }
         }
         mtl_all.insert(lang.to_string(), map);
     }
 
     // 辅助：查找文本
     let get_text = |lang: &str, key: &str| -> String {
-        mtl_all.get(lang)
+        mtl_all
+            .get(lang)
             .and_then(|m| m.get(key))
             .cloned()
             .unwrap_or_default()
@@ -318,7 +321,9 @@ pub fn generate_cards_full(
     let mut entries: Vec<CardFullEntry> = Vec::new();
     for cm in &card_master {
         let card_id = cm[0].as_i64().unwrap_or(0);
-        if card_id == 0 { continue; }
+        if card_id == 0 {
+            continue;
+        }
 
         let base_card_id = cm[1].as_i64().unwrap_or(card_id);
         let card_style_id = cm[2].as_i64().unwrap_or(0);
@@ -335,12 +340,17 @@ pub fn generate_cards_full(
         let type_flags = bcm.and_then(|r| serde_json::to_value(&r[1]).ok());
 
         // 技能
-        let skills: Vec<SkillEntry> = skills_by_cid.get(&card_id)
-            .map(|v| v.iter().map(|r| SkillEntry {
-                skill_id: r[0].as_i64().unwrap_or(0),
-                skill_type: r[1].as_i64().unwrap_or(0),
-                subtype: r[2].as_i64().unwrap_or(0),
-            }).collect())
+        let skills: Vec<SkillEntry> = skills_by_cid
+            .get(&card_id)
+            .map(|v| {
+                v.iter()
+                    .map(|r| SkillEntry {
+                        skill_id: r[0].as_i64().unwrap_or(0),
+                        skill_type: r[1].as_i64().unwrap_or(0),
+                        subtype: r[2].as_i64().unwrap_or(0),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         // 文本键：通过 card_style_id 查 CardText
@@ -360,10 +370,22 @@ pub fn generate_cards_full(
         let name_cht = get_text("Cht", &cn_key);
 
         entries.push(CardFullEntry {
-            card_id, base_card_id, card_style_id, class,
-            cost, rarity, type_flags, is_evolution, evolves_to,
-            skills, resource_id,
-            name_chs, name_eng, name_jpn, name_kor, name_cht,
+            card_id,
+            base_card_id,
+            card_style_id,
+            class,
+            cost,
+            rarity,
+            type_flags,
+            is_evolution,
+            evolves_to,
+            skills,
+            resource_id,
+            name_chs,
+            name_eng,
+            name_jpn,
+            name_kor,
+            name_cht,
             text_keys: TextKeys {
                 name: cn_key,
                 skill_desc: sd_key,
@@ -386,8 +408,8 @@ pub fn generate_cards_full(
 /// 读取一个已导出的 JSON 表文件
 fn read_json_table(dir: &Path, filename: &str) -> anyhow::Result<Vec<Vec<serde_json::Value>>> {
     let path = dir.join(filename);
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("无法读取: {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(&path).with_context(|| format!("无法读取: {}", path.display()))?;
     let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&content)
         .with_context(|| format!("JSON 解析失败: {}", path.display()))?;
     Ok(rows)
@@ -450,18 +472,18 @@ pub fn generate_pack_names(
 /// # 参数
 /// - master_data_dir: exports/master-data/ 目录（下面有 Chs/ Eng/ Jpn/ Kor/ Cht/ 子目录）
 /// - output_path: emblems_full.json 输出路径
-pub fn generate_emblems_full(
-    master_data_dir: &Path,
-    output_path: &Path,
-) -> anyhow::Result<usize> {
+pub fn generate_emblems_full(master_data_dir: &Path, output_path: &Path) -> anyhow::Result<usize> {
     use std::collections::HashMap;
 
     let chs_dir = master_data_dir.join("Chs");
-    let emblem_master: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "EmblemMaster.json")?;
-    let emblem_category: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "EmblemCategotyMaster.json")?;
+    let emblem_master: Vec<Vec<serde_json::Value>> =
+        read_json_table(&chs_dir, "EmblemMaster.json")?;
+    let emblem_category: Vec<Vec<serde_json::Value>> =
+        read_json_table(&chs_dir, "EmblemCategotyMaster.json")?;
 
     // 分类 ID → text key
-    let cat_key_map: HashMap<i64, String> = emblem_category.iter()
+    let cat_key_map: HashMap<i64, String> = emblem_category
+        .iter()
         .filter_map(|r| {
             let id = r[0].as_i64()?;
             let key = r[1].as_str()?.to_string();
@@ -473,14 +495,15 @@ pub fn generate_emblems_full(
     let langs = ["Chs", "Eng", "Jpn", "Kor", "Cht"];
     let mut mtl_all: HashMap<String, HashMap<String, String>> = HashMap::new();
     for lang in &langs {
-        let mtl: Vec<Vec<serde_json::Value>> = read_json_table(
-            &master_data_dir.join(lang), "MasterTextLabel.json"
-        )?;
+        let mtl: Vec<Vec<serde_json::Value>> =
+            read_json_table(&master_data_dir.join(lang), "MasterTextLabel.json")?;
         let mut map = HashMap::new();
         for r in &mtl {
             let key = r[0].as_str().unwrap_or("").to_string();
             let val = r[1].as_str().unwrap_or("").to_string();
-            if !key.is_empty() { map.insert(key, val); }
+            if !key.is_empty() {
+                map.insert(key, val);
+            }
         }
         mtl_all.insert(lang.to_string(), map);
     }
@@ -488,20 +511,23 @@ pub fn generate_emblems_full(
     // 获取多语言 category 文本
     let get_cat_text = |lang: &str, cat_id: i64| -> String {
         let text_key = cat_key_map.get(&cat_id).cloned().unwrap_or_default();
-        mtl_all.get(lang)
+        mtl_all
+            .get(lang)
             .and_then(|m| m.get(&text_key))
             .cloned()
             .unwrap_or_default()
     };
 
     // cards_full.json 索引: card_style_id → card entry
-    let cards_path = output_path.parent()
+    let cards_path = output_path
+        .parent()
         .map(|p| p.join("cards_full.json"))
         .unwrap_or_else(|| PathBuf::from("cards_full.json"));
     let card_index: HashMap<i64, CardFullEntry> = if cards_path.exists() {
         let raw = std::fs::read_to_string(&cards_path)?;
         let cards: Vec<CardFullEntry> = serde_json::from_str(&raw).unwrap_or_default();
-        cards.into_iter()
+        cards
+            .into_iter()
             .filter(|c| !c.is_evolution)
             .map(|c| (c.card_style_id, c))
             .collect()
@@ -513,7 +539,9 @@ pub fn generate_emblems_full(
     let mut entries: Vec<EmblemFullEntry> = Vec::new();
     for row in &emblem_master {
         let emblem_id = row[0].as_i64().unwrap_or(0);
-        if emblem_id == 0 { continue; }
+        if emblem_id == 0 {
+            continue;
+        }
         let name_jpn = row[2].as_str().unwrap_or("").to_string();
         let resource_name = row[3].as_str().unwrap_or("").to_string();
         let category = row[4].as_i64().unwrap_or(0);
@@ -542,7 +570,11 @@ pub fn generate_emblems_full(
             category_name_kor: cat_kor,
             category_name_cht: cat_cht,
             is_premium,
-            parent_emblem_id: if parent_id != 0 { Some(parent_id) } else { None },
+            parent_emblem_id: if parent_id != 0 {
+                Some(parent_id)
+            } else {
+                None
+            },
             card_id: card.map(|c| c.card_id),
             card_name_chs: card.map(|c| c.name_chs.clone()),
             card_name_eng: card.map(|c| c.name_eng.clone()),
@@ -600,19 +632,19 @@ struct EmblemFullEntry {
 /// # 参数
 /// - master_data_dir: exports/master-data/ 目录（下面有 Chs/ Eng/ Jpn/ Kor/ Cht/ 子目录）
 /// - output_path: stamps_full.json 输出路径
-pub fn generate_stamps_full(
-    master_data_dir: &Path,
-    output_path: &Path,
-) -> anyhow::Result<usize> {
+pub fn generate_stamps_full(master_data_dir: &Path, output_path: &Path) -> anyhow::Result<usize> {
     use std::collections::HashMap;
 
     let chs_dir = master_data_dir.join("Chs");
     let stamp_master: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "Stamp.json")?;
-    let stamp_category: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "StampCategory.json")?;
-    let chat_stamp: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "ChatStampMaster.json")?;
+    let stamp_category: Vec<Vec<serde_json::Value>> =
+        read_json_table(&chs_dir, "StampCategory.json")?;
+    let chat_stamp: Vec<Vec<serde_json::Value>> =
+        read_json_table(&chs_dir, "ChatStampMaster.json")?;
 
     // 分类 ID → text key
-    let cat_key_map: HashMap<i64, String> = stamp_category.iter()
+    let cat_key_map: HashMap<i64, String> = stamp_category
+        .iter()
         .filter_map(|r| {
             let id = r[0].as_i64()?;
             let key = r[1].as_str()?.to_string();
@@ -624,14 +656,15 @@ pub fn generate_stamps_full(
     let langs = ["Chs", "Eng", "Jpn", "Kor", "Cht"];
     let mut mtl_all: HashMap<String, HashMap<String, String>> = HashMap::new();
     for lang in &langs {
-        let mtl: Vec<Vec<serde_json::Value>> = read_json_table(
-            &master_data_dir.join(lang), "MasterTextLabel.json"
-        )?;
+        let mtl: Vec<Vec<serde_json::Value>> =
+            read_json_table(&master_data_dir.join(lang), "MasterTextLabel.json")?;
         let mut map = HashMap::new();
         for r in &mtl {
             let key = r[0].as_str().unwrap_or("").to_string();
             let val = r[1].as_str().unwrap_or("").to_string();
-            if !key.is_empty() { map.insert(key, val); }
+            if !key.is_empty() {
+                map.insert(key, val);
+            }
         }
         mtl_all.insert(lang.to_string(), map);
     }
@@ -639,7 +672,8 @@ pub fn generate_stamps_full(
     // 获取多语言分类名
     let get_cat_text = |lang: &str, cat_id: i64| -> String {
         let text_key = cat_key_map.get(&cat_id).cloned().unwrap_or_default();
-        mtl_all.get(lang)
+        mtl_all
+            .get(lang)
             .and_then(|m| m.get(&text_key))
             .cloned()
             .unwrap_or_default()
@@ -647,7 +681,8 @@ pub fn generate_stamps_full(
 
     // 获取多语言 stamp 名称
     let get_name = |lang: &str, text_key: &str| -> String {
-        mtl_all.get(lang)
+        mtl_all
+            .get(lang)
             .and_then(|m| m.get(text_key))
             .cloned()
             .unwrap_or_default()
@@ -655,15 +690,36 @@ pub fn generate_stamps_full(
 
     // ChatStamp 索引: id → 5 语言文本
     // ChatStampMaster 只存日文，需要从 MasterTextLabel 查 ChatStampText_{id}
-    let chat_texts: HashMap<i64, (String, String, String, String, String)> = chat_stamp.iter()
+    let chat_texts: HashMap<i64, (String, String, String, String, String)> = chat_stamp
+        .iter()
         .filter_map(|r| {
             let id = r[0].as_i64()?;
             let key = format!("ChatStampText_{id}");
-            let chs = mtl_all.get("Chs").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
-            let eng = mtl_all.get("Eng").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
-            let jpn = mtl_all.get("Jpn").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
-            let kor = mtl_all.get("Kor").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
-            let cht = mtl_all.get("Cht").and_then(|m| m.get(&key)).cloned().unwrap_or_default();
+            let chs = mtl_all
+                .get("Chs")
+                .and_then(|m| m.get(&key))
+                .cloned()
+                .unwrap_or_default();
+            let eng = mtl_all
+                .get("Eng")
+                .and_then(|m| m.get(&key))
+                .cloned()
+                .unwrap_or_default();
+            let jpn = mtl_all
+                .get("Jpn")
+                .and_then(|m| m.get(&key))
+                .cloned()
+                .unwrap_or_default();
+            let kor = mtl_all
+                .get("Kor")
+                .and_then(|m| m.get(&key))
+                .cloned()
+                .unwrap_or_default();
+            let cht = mtl_all
+                .get("Cht")
+                .and_then(|m| m.get(&key))
+                .cloned()
+                .unwrap_or_default();
             Some((id, (chs, eng, jpn, kor, cht)))
         })
         .collect();
@@ -672,7 +728,9 @@ pub fn generate_stamps_full(
     let mut entries: Vec<StampFullEntry> = Vec::new();
     for row in &stamp_master {
         let stamp_id = row[0].as_i64().unwrap_or(0);
-        if stamp_id == 0 { continue; }
+        if stamp_id == 0 {
+            continue;
+        }
         let category = row[1].as_i64().unwrap_or(0);
         let resource_name = row[2].as_str().unwrap_or("").to_string();
         let enabled = row[3].as_bool().unwrap_or(true);
@@ -683,8 +741,10 @@ pub fn generate_stamps_full(
         let is_chat = name_key.starts_with("ChatStampText_");
         let (name_chs, name_eng, name_jpn, name_kor, name_cht) = if is_chat {
             // 聊天贴图的文本从 ChatStampMaster 索引取
-            let chat_id: i64 = name_key.strip_prefix("ChatStampText_")
-                .and_then(|s| s.parse().ok()).unwrap_or(0);
+            let chat_id: i64 = name_key
+                .strip_prefix("ChatStampText_")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             chat_texts.get(&chat_id).cloned().unwrap_or_default()
         } else {
             (
@@ -745,8 +805,6 @@ struct StampFullEntry {
     name_cht: String,
     is_chat: bool,
 }
-
-
 
 // ---------------------------------------------------------------------------
 // 测试

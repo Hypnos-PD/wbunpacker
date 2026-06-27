@@ -22,7 +22,10 @@ fn test_parse_real_manifest() {
 
     // 打印前几条
     for a in manifest.assets.iter().take(3) {
-        println!("  asset: {} | key={} | size={} | cat={}", a.name, a.key, a.size, a.category);
+        println!(
+            "  asset: {} | key={} | size={} | cat={}",
+            a.name, a.key, a.size, a.category
+        );
     }
     for r in manifest.raw_assets.iter().take(3) {
         println!("  raw:   {} | size={} | cat={}", r.name, r.size, r.category);
@@ -34,4 +37,3 @@ fn test_parse_real_manifest() {
         println!("  name:  {} => {}", l.asset_name, l.name);
     }
 }
-

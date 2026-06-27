@@ -53,8 +53,7 @@ pub struct DeviceInfo {
 }
 
 pub fn load() -> anyhow::Result<AppConfig> {
-    let path =
-        std::env::var("WBU_CONFIG").unwrap_or_else(|_| "config/Config.local.toml".into());
+    let path = std::env::var("WBU_CONFIG").unwrap_or_else(|_| "config/Config.local.toml".into());
     let content =
         std::fs::read_to_string(&path).with_context(|| format!("无法读取配置文件: {path}"))?;
     toml::from_str(&content).context("配置文件 TOML 解析失败")
