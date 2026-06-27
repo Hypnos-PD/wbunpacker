@@ -1141,10 +1141,6 @@ fn run_asset_studio_extract(
         .args([
             "-t",
             "all",
-            "-g",
-            "fileName",
-            "-f",
-            "assetName",
             "-o",
             &output_dir.to_string_lossy(),
             "-r",
@@ -1158,8 +1154,49 @@ fn run_asset_studio_extract(
     if !status.success() {
         anyhow::bail!("[{variant}] {label} AssetStudio 退出码: {:?}", status.code());
     }
-    println!("[{variant}] {label} 提取完成: {}", output_dir.display());
+    // Flatten: move all files from subdirectories to output_dir root
+    let count = flatten_dir(output_dir, output_dir)?;
+    println!("[{variant}] {label} 提取完成: {count} 个文件 → {}", output_dir.display());
     Ok(())
+}
+
+/// 递归地把子目录里的文件全部移到 root 目录，然后删除空子目录
+fn flatten_dir(dir: &std::path::Path, root: &std::path::Path) -> std::io::Result<usize> {
+    let mut count = 0;
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    for entry in entries {
+        if entry.is_dir() {
+            count += flatten_dir(&entry, root)?;
+            let _ = std::fs::remove_dir(&entry);
+        } else {
+            let dst = root.join(entry.file_name().unwrap_or_default());
+            if entry != dst {
+                let mut dst = dst;
+                // Handle filename collisions: append _1, _2, etc.
+                if dst.exists() {
+                    let stem = dst.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let ext = dst.extension().unwrap_or_default().to_string_lossy();
+                    for i in 1u32.. {
+                        let candidate = if ext.is_empty() {
+                            root.join(format!("{stem}_{i}"))
+                        } else {
+                            root.join(format!("{stem}_{i}.{ext}"))
+                        };
+                        if !candidate.exists() {
+                            dst = candidate;
+                            break;
+                        }
+                    }
+                }
+                std::fs::rename(&entry, &dst)?;
+            }
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 // ============================================================================
