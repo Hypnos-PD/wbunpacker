@@ -47,7 +47,7 @@ pub mod home_illust;
 // ============================================================================
 
 /// Unity 版本（用于 AssetStudio 解析）
-const UNITY_VERSION: &str = "2022.3.62f2";
+pub const UNITY_VERSION: &str = "2022.3.62f2";
 
 /// Card/Textures 在 manifest 中的路径前缀
 const CARD_TEXTURES_PREFIX: &str = "Assets/_Wizard2Resources/Card/Textures/";
