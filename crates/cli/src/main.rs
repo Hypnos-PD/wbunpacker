@@ -1,6 +1,8 @@
 mod config;
+mod diff_output;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use std::process::Command as ProcessCommand;
 // ============================================================================
 // CLI 顶层结构
 // ============================================================================
@@ -17,10 +19,12 @@ enum Command {
     Manifest {
         #[arg(short = 'V', long)]
         version: Option<String>,
-        #[arg(short, long)]
+        #[arg(short, long, default_value = "Chs")]
         variant: String,
         #[arg(short, long, default_value = "raw")]
         format: String,
+        #[command(subcommand)]
+        sub: Option<ManifestCmd>,
     },
     /// 下载和解密 AssetBundle
     Asset {
@@ -76,7 +80,6 @@ enum Command {
         #[arg(long)]
         dll: Option<String>,
     },
-    
 }
 #[derive(Subcommand)]
 enum AssetCmd {
@@ -98,6 +101,38 @@ enum AssetCmd {
         variant: String,
         #[arg(short = 'c', long, default_value = "8")]
         concurrency: usize,
+        #[arg(long)]
+        diff: Option<String>,
+        /// diff 模式下载后用 AssetStudioModCLI 导出全部内容
+        #[arg(long)]
+        extract: bool,
+        /// AssetStudioModCLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+    },
+}
+#[derive(Subcommand)]
+enum ManifestCmd {
+    /// 比较两个清单版本的差异
+    Diff {
+        /// Git revision (commit/tag) or path to an old manifest .json file
+        #[arg(short = 'o', long)]
+        old: String,
+        /// Git revision (commit/tag) or path to a new manifest .json file
+        #[arg(short = 'n', long)]
+        new: String,
+        /// Variant filter: variant name or "all"
+        #[arg(short = 'v', long, default_value = "all")]
+        variant: String,
+        /// Override Git repo path; defaults to <data_dir>/manifests/json
+        #[arg(short = 'r', long)]
+        repo: Option<String>,
+        /// Override output directory
+        #[arg(short = 'O', long)]
+        output: Option<String>,
+        /// Show top N changed items in summary
+        #[arg(short = 't', long, default_value = "20")]
+        top: usize,
     },
 }
 #[derive(Subcommand)]
@@ -233,6 +268,900 @@ fn expand_variants(variant: &str) -> Vec<String> {
         vec![variant.to_string()]
     }
 }
+
+// ============================================================================
+// manifest diff 实现
+// ============================================================================
+
+/// Context bundled for diff output writers to avoid parameter bloat.
+struct DiffOutputCtx {
+    output_dir: String,
+    mode: &'static str,
+    repo_path: String,
+    old_rev: String,
+    new_rev: String,
+    old_label: String,
+    new_label: String,
+    variants: Vec<String>,
+}
+
+/// Run `manifest diff` with mode detection (file vs git) and output.
+fn run_diff(
+    old: &str,
+    new: &str,
+    variant: &str,
+    repo: Option<&str>,
+    output_override: Option<&str>,
+    top: usize,
+) -> anyhow::Result<()> {
+    let old_is_file = std::path::Path::new(old).exists();
+    let new_is_file = std::path::Path::new(new).exists();
+
+    anyhow::ensure!(
+        old_is_file == new_is_file,
+        "mixed file and revision — both must be files or both must be revisions"
+    );
+
+    let cfg = config::load()?;
+
+    let variants = if old_is_file {
+        anyhow::ensure!(
+            !variant.eq_ignore_ascii_case("all"),
+            "file mode requires a single variant (e.g. --variant Chs)"
+        );
+        anyhow::ensure!(
+            repo.is_none(),
+            "`--repo` is only used in Git mode; do not set it when passing file paths"
+        );
+        vec![variant.to_string()]
+    } else {
+        expand_variants(variant)
+    };
+
+    let mut variant_diffs: Vec<(String, manifest::Manifest, manifest::Manifest)> = Vec::new();
+    let (mode, repo_path, old_rev, new_rev, old_label, new_label, old_time, new_time);
+
+    if old_is_file {
+        mode = "file";
+        repo_path = String::new();
+        old_rev = String::new();
+        new_rev = String::new();
+        old_label = file_timestamp(old)?;
+        new_label = file_timestamp(new)?;
+        old_time = old_label.clone();
+        new_time = new_label.clone();
+
+        let old_manifest = read_manifest_file(old)?;
+        let new_manifest = read_manifest_file(new)?;
+        variant_diffs.push((variant.to_string(), old_manifest, new_manifest));
+    } else {
+        mode = "git";
+        repo_path = match repo {
+            Some(r) => r.to_string(),
+            None => format!("{}/manifests/json", cfg.data_dir),
+        };
+
+        // Verify git repo
+        let git_dir_check = ProcessCommand::new("git")
+            .args(["-C", &repo_path, "rev-parse", "--git-dir"])
+            .output()
+            .context("failed to run git rev-parse")?;
+        anyhow::ensure!(
+            git_dir_check.status.success(),
+            "not a valid Git repository: {repo_path}"
+        );
+
+        old_rev = old.to_string();
+        new_rev = new.to_string();
+
+        old_time = git_commit_time(&repo_path, old)?;
+        new_time = git_commit_time(&repo_path, new)?;
+        old_label = git_version_label(&repo_path, old)?;
+        new_label = git_version_label(&repo_path, new)?;
+
+        for v in &variants {
+            let old_json = git_show_manifest(&repo_path, old, v)?;
+            let new_json = git_show_manifest(&repo_path, new, v)?;
+            let old_manifest: manifest::Manifest = serde_json::from_str(&old_json)
+                .with_context(|| format!("failed to parse old manifest for variant {v}"))?;
+            let new_manifest: manifest::Manifest = serde_json::from_str(&new_json)
+                .with_context(|| format!("failed to parse new manifest for variant {v}"))?;
+            variant_diffs.push((v.clone(), old_manifest, new_manifest));
+        }
+    };
+
+    // Compute diffs for all variants
+    let mut diffs: Vec<(String, manifest::ManifestChanges)> = Vec::new();
+    for (v, old_m, new_m) in &variant_diffs {
+        diffs.push((v.clone(), manifest::diff_manifests(old_m, new_m)));
+    }
+
+    // Determine output directory (guarantee trailing /)
+    let mut output_dir = if let Some(o) = output_override {
+        o.to_string()
+    } else {
+        diff_output::build_diff_output_dir(
+            &cfg.data_dir,
+            &old_label,
+            &new_label,
+            &old_time,
+            &new_time,
+        )
+    };
+    if !output_dir.ends_with('/') {
+        output_dir.push('/');
+    }
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed to create output directory: {output_dir}"))?;
+
+    let ctx = DiffOutputCtx {
+        output_dir,
+        mode,
+        repo_path,
+        old_rev,
+        new_rev,
+        old_label,
+        new_label,
+        variants,
+    };
+
+    // Write all 6 output files
+    write_summary_json(&ctx, &variant_diffs, &diffs)?;
+    write_changed_json(&ctx, &diffs)?;
+    write_metadata_changed_json(&ctx, &diffs)?;
+    write_added_manifest_json(&ctx, &variant_diffs, &diffs)?;
+    write_removed_manifest_json(&ctx, &variant_diffs, &diffs)?;
+
+    // Print summary
+    print_diff_summary(&ctx, &variant_diffs, &diffs, top);
+
+    Ok(())
+}
+
+// --- helpers ---
+
+fn read_manifest_file(path: &str) -> anyhow::Result<manifest::Manifest> {
+    let json = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read manifest file: {path}"))?;
+    serde_json::from_str(&json).with_context(|| format!("failed to parse manifest: {path}"))
+}
+
+fn file_timestamp(path: &str) -> anyhow::Result<String> {
+    let meta =
+        std::fs::metadata(path).with_context(|| format!("failed to get metadata for: {path}"))?;
+    let modified = meta
+        .modified()
+        .with_context(|| format!("failed to get modification time for: {path}"))?;
+    let dur = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("invalid system time")?;
+    let secs = dur.as_secs();
+    // Convert to naive UTC datetime-like components
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Compute year/month/day from days since Unix epoch (simplified, accurate enough)
+    let (y, m, d) = days_since_epoch_to_ymd(days as i64);
+
+    Ok(format!(
+        "{y:04}{m:02}{d:02}-{hours:02}{minutes:02}{seconds:02}"
+    ))
+}
+
+fn days_since_epoch_to_ymd(mut days: i64) -> (i64, u32, u32) {
+    // Shift to start from 0000-03-01 (easier month length pattern)
+    days += 719468; // days from 0000-03-01 to 1970-01-01
+    let era = (if days >= 0 { days } else { days - 146096 }) / 146097;
+    let doe = days - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 {
+        (mp + 3) as u32
+    } else {
+        (mp - 9) as u32
+    };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+fn git_show_manifest(repo: &str, rev: &str, variant: &str) -> anyhow::Result<String> {
+    let path = format!("assetbundle.{variant}.manifest.json");
+    let output = ProcessCommand::new("git")
+        .args(["-C", repo, "show", &format!("{rev}:{path}")])
+        .output()
+        .with_context(|| format!("failed to run git show {rev}:{path}"))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git show failed for {rev}:{path}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8(output.stdout).context("git show output is not valid UTF-8")
+}
+
+fn git_commit_time(repo: &str, rev: &str) -> anyhow::Result<String> {
+    let output = ProcessCommand::new("git")
+        .args(["-C", repo, "log", "-1", "--format=%ai", rev])
+        .output()
+        .with_context(|| format!("failed to run git log for {rev}"))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git log failed for {rev}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let raw = String::from_utf8(output.stdout).context("git log output is not valid UTF-8")?;
+    let raw = raw.trim();
+    // git --format=%ai outputs: "2026-06-27 09:20:00 +0000"
+    parse_git_ai_timestamp(raw)
+}
+
+fn parse_git_ai_timestamp(raw: &str) -> anyhow::Result<String> {
+    // Format: "YYYY-MM-DD HH:MM:SS +TZOFF"
+    let parts: Vec<&str> = raw.split(&['-', ' ', ':']).collect();
+    anyhow::ensure!(parts.len() >= 6, "unexpected git timestamp format: {raw}");
+    let y = parts[0];
+    let m = parts[1];
+    let d = parts[2];
+    let h = parts[3];
+    let min = parts[4];
+    let s = parts[5];
+    Ok(format!("{y}{m}{d}-{h}{min}{s}"))
+}
+
+fn git_version_label(repo: &str, rev: &str) -> anyhow::Result<String> {
+    // Try extracting "ver.XXXXX" from commit subject
+    let subject_output = ProcessCommand::new("git")
+        .args(["-C", repo, "log", "-1", "--format=%s", rev])
+        .output()
+        .with_context(|| format!("failed to run git log for {rev}"))?;
+    if subject_output.status.success() {
+        let subject = String::from_utf8_lossy(&subject_output.stdout);
+        if let Some(label) = extract_ver_label(subject.trim()) {
+            return Ok(label);
+        }
+    }
+    // Fall back to short SHA
+    let sha_output = ProcessCommand::new("git")
+        .args(["-C", repo, "rev-parse", "--short", rev])
+        .output()
+        .with_context(|| format!("failed to run git rev-parse for {rev}"))?;
+    anyhow::ensure!(
+        sha_output.status.success(),
+        "git rev-parse failed for {rev}"
+    );
+    Ok(String::from_utf8_lossy(&sha_output.stdout)
+        .trim()
+        .to_string())
+}
+
+fn extract_ver_label(subject: &str) -> Option<String> {
+    // Look for "ver." followed by digits
+    if let Some(pos) = subject.find("ver.") {
+        let after = &subject[pos + 4..];
+        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+    None
+}
+
+fn format_with_commas(n: usize) -> String {
+    let s = n.to_string();
+    let len = s.len();
+    let mut result = String::with_capacity(len + (len.saturating_sub(1)) / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
+}
+
+// --- JSON output writers ---
+
+fn is_multi_variant(variants: &[String]) -> bool {
+    variants.len() > 1
+}
+
+fn write_summary_json(
+    ctx: &DiffOutputCtx,
+    variant_diffs: &[(String, manifest::Manifest, manifest::Manifest)],
+    diffs: &[(String, manifest::ManifestChanges)],
+) -> anyhow::Result<()> {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "mode".to_string(),
+        serde_json::Value::String(ctx.mode.to_string()),
+    );
+    if ctx.mode == "git" {
+        map.insert(
+            "repo".to_string(),
+            serde_json::Value::String(ctx.repo_path.clone()),
+        );
+        map.insert(
+            "old_rev".to_string(),
+            serde_json::Value::String(ctx.old_rev.clone()),
+        );
+        map.insert(
+            "new_rev".to_string(),
+            serde_json::Value::String(ctx.new_rev.clone()),
+        );
+    }
+    map.insert(
+        "old_label".to_string(),
+        serde_json::Value::String(ctx.old_label.clone()),
+    );
+    map.insert(
+        "new_label".to_string(),
+        serde_json::Value::String(ctx.new_label.clone()),
+    );
+    map.insert(
+        "variants".to_string(),
+        serde_json::Value::Array(
+            ctx.variants
+                .iter()
+                .map(|v| serde_json::Value::String(v.clone()))
+                .collect(),
+        ),
+    );
+
+    let mut summary_map = serde_json::Map::new();
+    for (v, changes) in diffs {
+        let (old_m, new_m) = variant_diffs
+            .iter()
+            .find(|(var, _, _)| var == v)
+            .map(|(_, old, new)| (old, new))
+            .with_context(|| format!("variant {v} not found in variant_diffs"))?;
+
+        let old_cfg_count = old_m.config.len();
+        let new_cfg_count = new_m.config.len();
+        let old_ln_count = old_m.load_names.len();
+        let new_ln_count = new_m.load_names.len();
+
+        summary_map.insert(v.clone(), serde_json::json!({
+            "assets": {
+                "old_count": old_m.assets.len(),
+                "new_count": new_m.assets.len(),
+                "added": changes.added_assets.len(),
+                "removed": changes.removed_assets.len(),
+                "content_changed": changes.content_changed_assets.len(),
+                "metadata_changed": changes.metadata_changed_assets.len(),
+            },
+            "raw_assets": {
+                "old_count": old_m.raw_assets.len(),
+                "new_count": new_m.raw_assets.len(),
+                "added": changes.added_raw_assets.len(),
+                "removed": changes.removed_raw_assets.len(),
+                "content_changed": changes.content_changed_raw_assets.len(),
+                "metadata_changed": changes.metadata_changed_raw_assets.len(),
+            },
+            "config": {
+                "old_count": old_cfg_count,
+                "new_count": new_cfg_count,
+                "added": changes.config_changes.iter().filter(|c| matches!(c, manifest::ConfigChange::Added(_))).count(),
+                "removed": changes.config_changes.iter().filter(|c| matches!(c, manifest::ConfigChange::Removed(_))).count(),
+                "value_changed": changes.config_changes.iter().filter(|c| matches!(c, manifest::ConfigChange::ValueChanged { .. })).count(),
+            },
+            "load_names": {
+                "old_count": old_ln_count,
+                "new_count": new_ln_count,
+                "added": changes.load_name_changes.iter().filter(|c| matches!(c, manifest::LoadNameChange::Added(_))).count(),
+                "removed": changes.load_name_changes.iter().filter(|c| matches!(c, manifest::LoadNameChange::Removed(_))).count(),
+                "name_changed": changes.load_name_changes.iter().filter(|c| matches!(c, manifest::LoadNameChange::NameChanged { .. })).count(),
+            },
+        }));
+    }
+    map.insert(
+        "summary".to_string(),
+        serde_json::Value::Object(summary_map),
+    );
+
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(map))?;
+    let path = std::path::Path::new(&ctx.output_dir).join("summary.json");
+    std::fs::write(&path, json)?;
+    println!("Wrote summary.json");
+    Ok(())
+}
+
+fn write_variant_group_json<F>(
+    ctx: &DiffOutputCtx,
+    diffs: &[(String, manifest::ManifestChanges)],
+    filename: &str,
+    single_key: &str,
+    build: F,
+) -> anyhow::Result<()>
+where
+    F: Fn(&manifest::ManifestChanges) -> serde_json::Value,
+{
+    let mut top_map = serde_json::Map::new();
+    if is_multi_variant(&ctx.variants) {
+        for (v, changes) in diffs {
+            top_map.insert(v.clone(), build(changes));
+        }
+    } else {
+        top_map.insert(
+            "variant".to_string(),
+            serde_json::Value::String(ctx.variants[0].clone()),
+        );
+        top_map.insert(single_key.to_string(), build(&diffs[0].1));
+    }
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(top_map))?;
+    let path = std::path::Path::new(&ctx.output_dir).join(filename);
+    std::fs::write(&path, json)?;
+    println!("Wrote {}", filename);
+    Ok(())
+}
+
+fn write_changed_json(
+    ctx: &DiffOutputCtx,
+    diffs: &[(String, manifest::ManifestChanges)],
+) -> anyhow::Result<()> {
+    write_variant_group_json(
+        ctx,
+        diffs,
+        "changed.json",
+        "content_changed",
+        build_content_changed_section,
+    )
+}
+
+fn build_content_changed_section(changes: &manifest::ManifestChanges) -> serde_json::Value {
+    let assets: Vec<_> = changes
+        .content_changed_assets
+        .iter()
+        .map(|(old, new)| {
+            serde_json::json!({
+                "old": old,
+                "new": new,
+            })
+        })
+        .collect();
+    let raw_assets: Vec<_> = changes
+        .content_changed_raw_assets
+        .iter()
+        .map(|(old, new)| {
+            serde_json::json!({
+                "old": old,
+                "new": new,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "assets": assets,
+        "raw_assets": raw_assets,
+    })
+}
+
+fn write_metadata_changed_json(
+    ctx: &DiffOutputCtx,
+    diffs: &[(String, manifest::ManifestChanges)],
+) -> anyhow::Result<()> {
+    write_variant_group_json(
+        ctx,
+        diffs,
+        "metadata_changed.json",
+        "metadata_changed",
+        build_metadata_changed_section,
+    )
+}
+
+fn build_metadata_changed_section(changes: &manifest::ManifestChanges) -> serde_json::Value {
+    let assets: Vec<_> = changes
+        .metadata_changed_assets
+        .iter()
+        .map(|(old, new)| {
+            let changed_fields = asset_metadata_changed_fields(old, new);
+            serde_json::json!({
+                "old": old,
+                "new": new,
+                "changes": changed_fields,
+            })
+        })
+        .collect();
+    let raw_assets: Vec<_> = changes
+        .metadata_changed_raw_assets
+        .iter()
+        .map(|(old, new)| {
+            let changed_fields = raw_metadata_changed_fields(old, new);
+            serde_json::json!({
+                "old": old,
+                "new": new,
+                "changes": changed_fields,
+            })
+        })
+        .collect();
+    let config: Vec<_> = changes
+        .config_changes
+        .iter()
+        .filter_map(|c| match c {
+            manifest::ConfigChange::ValueChanged {
+                key,
+                old_value,
+                new_value,
+            } => Some(serde_json::json!({
+                "key": key,
+                "old_value": old_value,
+                "new_value": new_value,
+            })),
+            _ => None,
+        })
+        .collect();
+    let load_names: Vec<_> = changes
+        .load_name_changes
+        .iter()
+        .filter_map(|c| match c {
+            manifest::LoadNameChange::NameChanged {
+                asset_name,
+                old_name,
+                new_name,
+            } => Some(serde_json::json!({
+                "asset_name": asset_name,
+                "old_name": old_name,
+                "new_name": new_name,
+            })),
+            _ => None,
+        })
+        .collect();
+    serde_json::json!({
+        "assets": assets,
+        "raw_assets": raw_assets,
+        "config": config,
+        "load_names": load_names,
+    })
+}
+
+fn asset_metadata_changed_fields(
+    old: &manifest::ManifestAsset,
+    new: &manifest::ManifestAsset,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if old.asset_id != new.asset_id {
+        fields.push("asset_id");
+    }
+    if old.all_dependencies != new.all_dependencies {
+        fields.push("dependencies");
+    }
+    if old.category != new.category {
+        fields.push("category");
+    }
+    if old.group != new.group {
+        fields.push("group");
+    }
+    if old.key != new.key {
+        fields.push("key");
+    }
+    fields
+}
+
+fn raw_metadata_changed_fields(
+    old: &manifest::RawAsset,
+    new: &manifest::RawAsset,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if old.category != new.category {
+        fields.push("category");
+    }
+    if old.group != new.group {
+        fields.push("group");
+    }
+    fields
+}
+
+fn write_added_manifest_json(
+    ctx: &DiffOutputCtx,
+    variant_diffs: &[(String, manifest::Manifest, manifest::Manifest)],
+    diffs: &[(String, manifest::ManifestChanges)],
+) -> anyhow::Result<()> {
+    let mut top_map = serde_json::Map::new();
+    for (v, _, _new_manifest) in variant_diffs {
+        let changes = diffs.iter().find(|(var, _)| var == v).map(|(_, c)| c);
+        let added = build_added_manifest(changes);
+        top_map.insert(v.clone(), serde_json::to_value(added)?);
+    }
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(top_map))?;
+    let path = std::path::Path::new(&ctx.output_dir).join("added_manifest.json");
+    std::fs::write(&path, json)?;
+    println!("Wrote added_manifest.json");
+    Ok(())
+}
+
+fn build_added_manifest(
+    changes: Option<&manifest::ManifestChanges>,
+) -> manifest::Manifest {
+    let Some(c) = changes else {
+        return manifest::Manifest {
+            assets: vec![],
+            raw_assets: vec![],
+            config: vec![],
+            load_names: vec![],
+        };
+    };
+    let assets: Vec<manifest::ManifestAsset> = c.added_assets.clone();
+    let raw_assets: Vec<manifest::RawAsset> = c.added_raw_assets.clone();
+    manifest::Manifest {
+        assets,
+        raw_assets,
+        config: vec![],
+        load_names: vec![],
+    }
+}
+
+fn build_removed_manifest(
+    changes: Option<&manifest::ManifestChanges>,
+) -> manifest::Manifest {
+    let Some(c) = changes else {
+        return manifest::Manifest {
+            assets: vec![],
+            raw_assets: vec![],
+            config: vec![],
+            load_names: vec![],
+        };
+    };
+    manifest::Manifest {
+        assets: c.removed_assets.clone(),
+        raw_assets: c.removed_raw_assets.clone(),
+        config: vec![],
+        load_names: vec![],
+    }
+}
+
+fn write_removed_manifest_json(
+    ctx: &DiffOutputCtx,
+    variant_diffs: &[(String, manifest::Manifest, manifest::Manifest)],
+    diffs: &[(String, manifest::ManifestChanges)],
+) -> anyhow::Result<()> {
+    let mut top_map = serde_json::Map::new();
+    for (v, _, _) in variant_diffs {
+        let changes = diffs.iter().find(|(var, _)| var == v).map(|(_, c)| c);
+        let removed = build_removed_manifest(changes);
+        top_map.insert(v.clone(), serde_json::to_value(removed)?);
+    }
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(top_map))?;
+    let path = std::path::Path::new(&ctx.output_dir).join("removed_manifest.json");
+    std::fs::write(&path, json)?;
+    println!("Wrote removed_manifest.json");
+    Ok(())
+}
+
+fn print_diff_summary(
+    ctx: &DiffOutputCtx,
+    variant_diffs: &[(String, manifest::Manifest, manifest::Manifest)],
+    diffs: &[(String, manifest::ManifestChanges)],
+    top: usize,
+) {
+    println!();
+    println!("=== Manifest Diff: {} → {} ===", ctx.old_label, ctx.new_label);
+    if ctx.mode == "git" {
+        println!("Repo: {}", ctx.repo_path);
+    }
+    println!("Mode: {}", ctx.mode);
+    println!();
+
+    for (v, changes) in diffs {
+        let (old_m, new_m) = variant_diffs
+            .iter()
+            .find(|(var, _, _)| var == v)
+            .map(|(_, old, new)| (old, new))
+            .expect("variant {v} not found in variant_diffs");
+
+        let asset_old_count = old_m.assets.len();
+        let asset_new_count = new_m.assets.len();
+        let raw_old_count = old_m.raw_assets.len();
+        let raw_new_count = new_m.raw_assets.len();
+        let cfg_old_count = old_m.config.len();
+        let cfg_new_count = new_m.config.len();
+        let ln_old_count = old_m.load_names.len();
+        let ln_new_count = new_m.load_names.len();
+
+        println!("  {v} ─────────────────────────────────────────");
+
+        // assets
+        let a_add = changes.added_assets.len();
+        let a_rem = changes.removed_assets.len();
+        let a_content = changes.content_changed_assets.len();
+        let a_meta = changes.metadata_changed_assets.len();
+        println!(
+            "  assets:      {} → {}   +{} / -{}",
+            format_with_commas(asset_old_count),
+            format_with_commas(asset_new_count),
+            a_add,
+            a_rem,
+        );
+        println!("    content changed:    {}", format_with_commas(a_content));
+        println!("    metadata only:      {}", format_with_commas(a_meta));
+
+        // Print top N added asset names if any
+        if a_add > 0 && top > 0 {
+            println!("    added (top {}):", top.min(a_add));
+            for a in changes.added_assets.iter().take(top) {
+                println!("      + {}", a.name);
+            }
+            if a_add > top {
+                println!("      ... and {} more", a_add - top);
+            }
+        }
+        if a_rem > 0 && top > 0 {
+            println!("    removed (top {}):", top.min(a_rem));
+            for a in changes.removed_assets.iter().take(top) {
+                println!("      - {}", a.name);
+            }
+            if a_rem > top {
+                println!("      ... and {} more", a_rem - top);
+            }
+        }
+
+        // raw_assets
+        let r_add = changes.added_raw_assets.len();
+        let r_rem = changes.removed_raw_assets.len();
+        let r_content = changes.content_changed_raw_assets.len();
+        let r_meta = changes.metadata_changed_raw_assets.len();
+        println!(
+            "  raw_assets:  {} → {}   +{} / -{}",
+            format_with_commas(raw_old_count),
+            format_with_commas(raw_new_count),
+            r_add,
+            r_rem,
+        );
+        println!("    content changed:    {}", format_with_commas(r_content));
+        println!("    metadata only:      {}", format_with_commas(r_meta));
+
+        // config
+        let cfg_add = changes
+            .config_changes
+            .iter()
+            .filter(|c| matches!(c, manifest::ConfigChange::Added(_)))
+            .count();
+        let cfg_rem = changes
+            .config_changes
+            .iter()
+            .filter(|c| matches!(c, manifest::ConfigChange::Removed(_)))
+            .count();
+        let cfg_val = changes
+            .config_changes
+            .iter()
+            .filter(|c| matches!(c, manifest::ConfigChange::ValueChanged { .. }))
+            .count();
+        println!(
+            "  config:       {} → {}             +{} / -{}",
+            cfg_old_count, cfg_new_count, cfg_add, cfg_rem,
+        );
+        if cfg_val > 0 {
+            println!("    value changed:       {}", cfg_val);
+        }
+
+        // load_names
+        let ln_add = changes
+            .load_name_changes
+            .iter()
+            .filter(|c| matches!(c, manifest::LoadNameChange::Added(_)))
+            .count();
+        let ln_rem = changes
+            .load_name_changes
+            .iter()
+            .filter(|c| matches!(c, manifest::LoadNameChange::Removed(_)))
+            .count();
+        let ln_name = changes
+            .load_name_changes
+            .iter()
+            .filter(|c| matches!(c, manifest::LoadNameChange::NameChanged { .. }))
+            .count();
+        if ln_add == 0 && ln_rem == 0 && ln_name == 0 {
+            println!("  load_names:   unchanged");
+        } else {
+            println!(
+                "  load_names:   {} → {}             +{} / -{}",
+                ln_old_count, ln_new_count, ln_add, ln_rem,
+            );
+            if ln_name > 0 {
+                println!("    name changed:        {}", ln_name);
+            }
+        }
+        println!();
+    }
+
+    println!("Output: {}", ctx.output_dir);
+}
+
+// ============================================================================
+// Diff 下载/提取辅助函数
+// ============================================================================
+
+async fn download_diff_set(
+    export: &std::collections::HashMap<String, manifest::Manifest>,
+    variants: &[String],
+    target_dir: &std::path::Path,
+    address: &str,
+    base_keys: &str,
+    concurrency: usize,
+    label: &str,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(target_dir)?;
+    for v in variants {
+        let m = match export.get(v) {
+            Some(m) => m,
+            None => {
+                println!("[{v}] {label} 清单中未找到此变体，跳过");
+                continue;
+            }
+        };
+        if m.assets.is_empty() && m.raw_assets.is_empty() {
+            println!("[{v}] {label} 中无变更资源，跳过");
+            continue;
+        }
+        println!(
+            "[{v}] {label} 模式: {} 个资产 + {} 个 raw 资源",
+            m.assets.len(),
+            m.raw_assets.len()
+        );
+        let blobs_dir = target_dir.join("blobs");
+        let variant_dir = target_dir.join("variants").join(v);
+        let stats = asset::batch_download(
+            m,
+            address,
+            base_keys,
+            concurrency,
+            &blobs_dir,
+            &variant_dir,
+        )
+        .await?;
+        println!(
+            "[{v}] {label} 完成: {} | 跳过: {} | 失败: {} | 硬链接: {} | 下载: {:.1} MB",
+            stats.done,
+            stats.skipped,
+            stats.failed,
+            stats.hardlinks,
+            stats.downloaded_bytes as f64 / 1024.0 / 1024.0
+        );
+    }
+    Ok(())
+}
+
+fn run_asset_studio_extract(
+    asset_studio_path: &std::path::Path,
+    input_dir: &std::path::Path,
+    output_dir: &std::path::Path,
+    variant: &str,
+    label: &str,
+) -> anyhow::Result<()> {
+    if !input_dir.exists() {
+        println!("[{variant}] {label} 解密目录不存在，跳过 AssetStudio 提取");
+        return Ok(());
+    }
+    std::fs::create_dir_all(output_dir)?;
+    println!("[{variant}] AssetStudio 导出 {label} 全部内容...");
+    let status = ProcessCommand::new(asset_studio_path)
+        .arg(input_dir)
+        .args([
+            "-t",
+            "all",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName",
+            "-o",
+            &output_dir.to_string_lossy(),
+            "-r",
+            "--unity-version",
+            texture::UNITY_VERSION,
+            "--log-level",
+            "warning",
+        ])
+        .status()
+        .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
+    if !status.success() {
+        anyhow::bail!("[{variant}] {label} AssetStudio 退出码: {:?}", status.code());
+    }
+    println!("[{variant}] {label} 提取完成: {}", output_dir.display());
+    Ok(())
+}
+
 // ============================================================================
 // 主函数
 // ============================================================================
@@ -250,26 +1179,47 @@ async fn main() -> anyhow::Result<()> {
             version,
             variant,
             format,
-        } => {
-            let cfg = config::load()?;
-            let version = version.unwrap_or(cfg.default_version);
-            for v in expand_variants(&variant) {
-                let raw = manifest::download(&version, &v, &cfg.manifest_address).await?;
-                let manifests_dir = format!("{}/manifests", cfg.data_dir);
-                match format.as_str() {
-                    "json" => {
-                        let m = manifest::parse(&raw)?;
-                        let json = manifest::to_json(&m)?;
-                        let out = format!("{}/json/assetbundle.{}.manifest.json", manifests_dir, v);
-                        std::fs::create_dir_all(format!("{}/json", manifests_dir))?;
-                        std::fs::write(&out, json)?;
-                        println!("{}", out);
-                    }
-                    _ => {
-                        let out = format!("{}/raw/assetbundle.{}.manifest", manifests_dir, v);
-                        std::fs::create_dir_all(format!("{}/raw", manifests_dir))?;
-                        std::fs::write(&out, &raw)?;
-                        println!("{}", out);
+            sub,
+        } => match sub {
+            Some(ManifestCmd::Diff {
+                old,
+                new,
+                variant,
+                repo,
+                output,
+                top,
+            }) => {
+                run_diff(
+                    &old,
+                    &new,
+                    &variant,
+                    repo.as_deref(),
+                    output.as_deref(),
+                    top,
+                )?;
+            }
+            None => {
+                let cfg = config::load()?;
+                let version = version.unwrap_or(cfg.default_version);
+                for v in expand_variants(&variant) {
+                    let raw = manifest::download(&version, &v, &cfg.manifest_address).await?;
+                    let manifests_dir = format!("{}/manifests", cfg.data_dir);
+                    match format.as_str() {
+                        "json" => {
+                            let m = manifest::parse(&raw)?;
+                            let json = manifest::to_json(&m)?;
+                            let out =
+                                format!("{}/json/assetbundle.{}.manifest.json", manifests_dir, v);
+                            std::fs::create_dir_all(format!("{}/json", manifests_dir))?;
+                            std::fs::write(&out, json)?;
+                            println!("{}", out);
+                        }
+                        _ => {
+                            let out = format!("{}/raw/assetbundle.{}.manifest", manifests_dir, v);
+                            std::fs::create_dir_all(format!("{}/raw", manifests_dir))?;
+                            std::fs::write(&out, &raw)?;
+                            println!("{}", out);
+                        }
                     }
                 }
             }
@@ -278,37 +1228,136 @@ async fn main() -> anyhow::Result<()> {
             AssetCmd::Batch {
                 variant,
                 concurrency,
+                diff,
+                extract,
+                asset_studio,
             } => {
                 let cfg = config::load()?;
-                for v in expand_variants(&variant) {
-                    let manifest_path = format!(
-                        "{}/manifests/json/assetbundle.{}.manifest.json",
-                        cfg.data_dir, v
-                    );
-                    let json = std::fs::read_to_string(&manifest_path)
-                        .with_context(|| format!("请先运行: wbu manifest -v {v} --format json"))?;
-                    let m: manifest::Manifest = serde_json::from_str(&json)?;
-                    let blobs_dir = std::path::Path::new(&cfg.data_dir).join("blobs");
-                    let variant_dir = std::path::Path::new(&cfg.data_dir)
-                        .join("variants")
-                        .join(&v);
-                    let stats = asset::batch_download(
-                        &m,
+                if extract && diff.is_none() {
+                    anyhow::bail!("--extract 只能与 --diff 一起使用");
+                }
+                if let Some(diff_path) = diff {
+                    let json_path = {
+                        let p = std::path::Path::new(&diff_path);
+                        if p.extension() == Some(std::ffi::OsStr::new("json")) {
+                            p.to_path_buf()
+                        } else {
+                            p.join("added_manifest.json")
+                        }
+                    };
+                    let diff_dir = json_path
+                        .parent()
+                        .ok_or_else(|| anyhow::anyhow!("无法确定 diff 输出目录"))?
+                        .to_path_buf();
+                    let json_str = std::fs::read_to_string(&json_path).with_context(|| {
+                        format!("无法读取 diff manifest: {}", json_path.display())
+                    })?;
+                    let export: std::collections::HashMap<String, manifest::Manifest> =
+                        serde_json::from_str(&json_str).with_context(|| {
+                            format!("无法解析 diff manifest: {}", json_path.display())
+                        })?;
+                    let variants = expand_variants(&variant);
+
+                    // 下载新增资源
+                    download_diff_set(
+                        &export,
+                        &variants,
+                        &diff_dir.join("added"),
                         &cfg.asset_bundle_address,
                         &cfg.asset_bundle_base_keys,
                         concurrency,
-                        &blobs_dir,
-                        &variant_dir,
+                        "新增",
                     )
                     .await?;
-                    println!(
-                        "[{v}] 完成: {} | 跳过: {} | 失败: {} | 硬链接: {} | 下载: {:.1} MB",
-                        stats.done,
-                        stats.skipped,
-                        stats.failed,
-                        stats.hardlinks,
-                        stats.downloaded_bytes as f64 / 1024.0 / 1024.0
-                    );
+
+                    if extract {
+                        // 下载删除的资源
+                        let removed_path = diff_dir.join("removed_manifest.json");
+                        if removed_path.exists() {
+                            let removed_json = std::fs::read_to_string(&removed_path)
+                                .with_context(|| {
+                                    format!("无法读取 removed manifest: {}", removed_path.display())
+                                })?;
+                            let removed: std::collections::HashMap<String, manifest::Manifest> =
+                                serde_json::from_str(&removed_json).with_context(|| {
+                                    format!(
+                                        "无法解析 removed manifest: {}",
+                                        removed_path.display()
+                                    )
+                                })?;
+                            download_diff_set(
+                                &removed,
+                                &variants,
+                                &diff_dir.join("removed"),
+                                &cfg.asset_bundle_address,
+                                &cfg.asset_bundle_base_keys,
+                                concurrency,
+                                "删除",
+                            )
+                            .await?;
+                        } else {
+                            println!("removed_manifest.json 不存在，跳过删除资源");
+                        }
+
+                        let asset_studio_path = if let Some(as_path) = asset_studio {
+                            std::path::PathBuf::from(as_path)
+                        } else {
+                            std::path::PathBuf::from(&cfg.asset_studio_path)
+                        };
+                        let extracted_dir = diff_dir.join("extracted");
+                        for v in &variants {
+                            run_asset_studio_extract(
+                                &asset_studio_path,
+                                &diff_dir.join("added").join("variants").join(v).join("decrypted"),
+                                &extracted_dir.join("added"),
+                                v,
+                                "新增",
+                            )?;
+                            run_asset_studio_extract(
+                                &asset_studio_path,
+                                &diff_dir
+                                    .join("removed")
+                                    .join("variants")
+                                    .join(v)
+                                    .join("decrypted"),
+                                &extracted_dir.join("removed"),
+                                v,
+                                "删除",
+                            )?;
+                        }
+                    }
+                } else {
+                    for v in expand_variants(&variant) {
+                        let manifest_path = format!(
+                            "{}/manifests/json/assetbundle.{}.manifest.json",
+                            cfg.data_dir, v
+                        );
+                        let json = std::fs::read_to_string(&manifest_path).with_context(|| {
+                            format!("请先运行: wbu manifest -v {v} --format json")
+                        })?;
+                        let m: manifest::Manifest = serde_json::from_str(&json)?;
+                        let blobs_dir = std::path::Path::new(&cfg.data_dir).join("blobs");
+                        let variant_dir = std::path::Path::new(&cfg.data_dir)
+                            .join("variants")
+                            .join(&v);
+                        let stats = asset::batch_download(
+                            &m,
+                            &cfg.asset_bundle_address,
+                            &cfg.asset_bundle_base_keys,
+                            concurrency,
+                            &blobs_dir,
+                            &variant_dir,
+                        )
+                        .await?;
+                        println!(
+                            "[{v}] 完成: {} | 跳过: {} | 失败: {} | 硬链接: {} | 下载: {:.1} MB",
+                            stats.done,
+                            stats.skipped,
+                            stats.failed,
+                            stats.hardlinks,
+                            stats.downloaded_bytes as f64 / 1024.0 / 1024.0
+                        );
+                    }
                 }
             }
             AssetCmd::Download { name, variant } => {
@@ -753,14 +1802,18 @@ async fn main() -> anyhow::Result<()> {
                 println!("批量渲染完成: {} | 跳过: {}", stats.rendered, stats.skipped);
             }
         },
-                Command::Metadb { path, output, dll } => {
+        Command::Metadb { path, output, dll } => {
             let cfg = config::load()?;
             let data_dir = std::path::Path::new(&cfg.data_dir);
             let default_dll = r"C:\Program Files (x86)\Steam\steamapps\common\ShadowverseWB\ShadowverseWB_Data\Plugins\x86_64\libnative.dll";
             let dll_path = dll.as_deref().unwrap_or(default_dll);
             let output_path = output.unwrap_or_else(|| {
-                data_dir.join("exports").join("meta").join("meta.db")
-                    .display().to_string()
+                data_dir
+                    .join("exports")
+                    .join("meta")
+                    .join("meta.db")
+                    .display()
+                    .to_string()
             });
             metadb::decrypt_metadb(
                 std::path::Path::new(&path),
@@ -771,7 +1824,6 @@ async fn main() -> anyhow::Result<()> {
             )?;
             println!("Decrypted: {}", output_path);
         }
-            }
+    }
     Ok(())
 }
-
