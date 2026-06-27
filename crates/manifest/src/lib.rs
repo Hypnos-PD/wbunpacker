@@ -28,11 +28,14 @@
 //! 2. `parse()`     — 剥离 MD5 尾缀 → 解析 TOC → 按偏移切片解析各表
 //! 3. `to_json()`   — 将解析结果序列化为 JSON（调试用）
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use lz4_flex::block::decompress as lz4_decompress;
 use rmpv::Value;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
+
+pub mod diff;
+pub use diff::*;
 
 // ============================================================================
 // 数据结构
@@ -41,7 +44,7 @@ use tracing::{debug, info};
 /// 单个 AssetBundle 条目 —— 加密的 Unity 资源包。
 ///
 /// 字段顺序对应 Wizard2.Domain.ManifestAsset 的 MessagePack Key 索引。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestAsset {
     /// 资源路径，如 "Assets/_Wizard2Resources/Card/Textures/100123100"
     /// Key 0 — 主键
@@ -75,7 +78,7 @@ pub struct ManifestAsset {
 /// 单个 RawAsset 条目 —— 无需解密的原始文件。
 ///
 /// 字段顺序对应 Wizard2.Domain.ManifestRawAsset。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawAsset {
     /// 原始资源路径
     /// Key 0 — 主键
@@ -97,7 +100,7 @@ pub struct RawAsset {
 /// CDN 配置条目（从 config 表解析）。
 ///
 /// 字段: Key 0 = key: str, Key 1 = value: str
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestConfigEntry {
     pub key: String,
     pub value: String,
@@ -106,7 +109,7 @@ pub struct ManifestConfigEntry {
 /// 加载名映射 —— AssetBundle 路径 → CriWare 加载时使用的名字。
 ///
 /// 字段: Key 0 = asset_name: str, Key 1 = name: str
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadNameEntry {
     /// AssetBundle 完整路径
     pub asset_name: String,
@@ -193,8 +196,7 @@ pub fn parse(raw: &[u8]) -> anyhow::Result<Manifest> {
 
     // 解析顶层 msgpack map (TOC)，记录 TOC 结束位置
     let mut cursor = &msgpack_body[..];
-    let root = rmpv::decode::value::read_value(&mut cursor)
-        .with_context(|| "msgpack 解码失败")?;
+    let root = rmpv::decode::value::read_value(&mut cursor).with_context(|| "msgpack 解码失败")?;
     let toc_end = msgpack_body.len() - cursor.len();
     debug!("TOC 结束位置: {}", toc_end);
 
@@ -222,13 +224,15 @@ pub fn parse(raw: &[u8]) -> anyhow::Result<Manifest> {
             }
             Some("raw_asset") => {
                 let (off, len) = parse_toc_entry(toc_val)?;
-                let rows = decode_and_decompress_table(msgpack_body, toc_end, off, len, "raw_asset")?;
+                let rows =
+                    decode_and_decompress_table(msgpack_body, toc_end, off, len, "raw_asset")?;
                 raw_assets = parse_raw_asset_table_from_rows(&rows)?;
                 info!("raw_asset 表: {} 条", raw_assets.len());
             }
             Some("assetname") => {
                 let (off, len) = parse_toc_entry(toc_val)?;
-                let rows = decode_and_decompress_table(msgpack_body, toc_end, off, len, "assetname")?;
+                let rows =
+                    decode_and_decompress_table(msgpack_body, toc_end, off, len, "assetname")?;
                 load_names = parse_load_name_table_from_rows(&rows)?;
                 info!("assetname 表: {} 条", load_names.len());
             }
@@ -288,9 +292,12 @@ fn decode_and_decompress_table(
     name: &str,
 ) -> anyhow::Result<Vec<Value>> {
     let actual_off = toc_end + toc_off;
-    let table_data = body
-        .get(actual_off..actual_off + toc_len)
-        .ok_or_else(|| anyhow!("{name} 表偏移越界: {actual_off} + {toc_len} > {}", body.len()))?;
+    let table_data = body.get(actual_off..actual_off + toc_len).ok_or_else(|| {
+        anyhow!(
+            "{name} 表偏移越界: {actual_off} + {toc_len} > {}",
+            body.len()
+        )
+    })?;
 
     let value = rmpv::decode::value::read_value(&mut &table_data[..])
         .with_context(|| format!("{name} 表 msgpack 解码失败"))?;
@@ -336,13 +343,10 @@ fn decode_and_decompress_table(
 ///   7: group         — 分组 (int)
 ///   8: checksum      — CRC64 (i64)
 fn parse_asset_table_from_rows(rows: &[Value]) -> anyhow::Result<Vec<ManifestAsset>> {
-
     rows.iter()
         .filter(|row| row.is_array())
         .map(|row| {
-            let fields = row
-                .as_array()
-                .ok_or_else(|| anyhow!("asset 行不是数组"))?;
+            let fields = row.as_array().ok_or_else(|| anyhow!("asset 行不是数组"))?;
 
             Ok(ManifestAsset {
                 name: get_str_at(fields, 0).unwrap_or_default(),
@@ -368,7 +372,6 @@ fn parse_asset_table_from_rows(rows: &[Value]) -> anyhow::Result<Vec<ManifestAss
 ///   3: category  — 分类: pck/bytes/usm/... (string)
 ///   4: group     — 分组 (int)
 fn parse_raw_asset_table_from_rows(rows: &[Value]) -> anyhow::Result<Vec<RawAsset>> {
-
     rows.iter()
         .filter(|row| row.is_array())
         .map(|row| {
@@ -391,13 +394,10 @@ fn parse_raw_asset_table_from_rows(rows: &[Value]) -> anyhow::Result<Vec<RawAsse
 ///
 /// 字段: 0: key (string), 1: value (string)
 fn parse_config_table_from_rows(rows: &[Value]) -> anyhow::Result<Vec<ManifestConfigEntry>> {
-
     rows.iter()
         .filter(|row| row.is_array())
         .map(|row| {
-            let fields = row
-                .as_array()
-                .ok_or_else(|| anyhow!("config 行不是数组"))?;
+            let fields = row.as_array().ok_or_else(|| anyhow!("config 行不是数组"))?;
 
             Ok(ManifestConfigEntry {
                 key: get_str_at(fields, 0).unwrap_or_default(),
@@ -413,7 +413,6 @@ fn parse_config_table_from_rows(rows: &[Value]) -> anyhow::Result<Vec<ManifestCo
 ///   0: asset_name  — AB 完整路径 (string, 主键)
 ///   1: name        — CriWare 加载名 (string)
 fn parse_load_name_table_from_rows(rows: &[Value]) -> anyhow::Result<Vec<LoadNameEntry>> {
-
     rows.iter()
         .filter(|row| row.is_array())
         .map(|row| {
@@ -472,8 +471,6 @@ fn get_int_array_at(array: &[Value], idx: usize) -> Vec<i64> {
 // 测试
 // ============================================================================
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,7 +485,10 @@ mod tests {
         // 构造 TOC，偏移从 TOC 结束位置算（0即跟在 TOC 后面）
         let toc = Value::Map(vec![(
             Value::String(table_name.into()),
-            Value::Array(vec![Value::Integer(0.into()), Value::Integer((body_len as i64).into())]),
+            Value::Array(vec![
+                Value::Integer(0.into()),
+                Value::Integer((body_len as i64).into()),
+            ]),
         )]);
 
         let mut buf = Vec::new();
