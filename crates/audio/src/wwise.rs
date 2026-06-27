@@ -60,12 +60,8 @@ pub fn decrypt_wwise_event_table(data: &[u8]) -> anyhow::Result<BTreeMap<u32, St
         ));
     }
 
-    let key: &[u8; 32] = data[0x00..0x20]
-        .try_into()
-        .context("密钥切片失败")?;
-    let iv: &[u8; 16] = data[0x20..0x30]
-        .try_into()
-        .context("IV 切片失败")?;
+    let key: &[u8; 32] = data[0x00..0x20].try_into().context("密钥切片失败")?;
+    let iv: &[u8; 16] = data[0x20..0x30].try_into().context("IV 切片失败")?;
     let ciphertext = &data[0x30..];
 
     let cipher = Aes256CbcDec::new(key.into(), iv.into());
@@ -87,10 +83,16 @@ pub fn decrypt_wwise_event_table(data: &[u8]) -> anyhow::Result<BTreeMap<u32, St
             break;
         }
         let event_id = u32::from_le_bytes([
-            plain[offset], plain[offset + 1], plain[offset + 2], plain[offset + 3],
+            plain[offset],
+            plain[offset + 1],
+            plain[offset + 2],
+            plain[offset + 3],
         ]);
         let name_len = u32::from_le_bytes([
-            plain[offset + 4], plain[offset + 5], plain[offset + 6], plain[offset + 7],
+            plain[offset + 4],
+            plain[offset + 5],
+            plain[offset + 6],
+            plain[offset + 7],
         ]) as usize;
         offset += 8;
 
@@ -158,7 +160,10 @@ pub fn extract_banks_from_pck(pck_data: &[u8]) -> Vec<Vec<u8>> {
         }
 
         let size_field = u32::from_le_bytes([
-            pck_data[idx + 4], pck_data[idx + 5], pck_data[idx + 6], pck_data[idx + 7],
+            pck_data[idx + 4],
+            pck_data[idx + 5],
+            pck_data[idx + 6],
+            pck_data[idx + 7],
         ]) as usize;
 
         // 2. BKHD size 合理性检查
@@ -174,10 +179,16 @@ pub fn extract_banks_from_pck(pck_data: &[u8]) -> Vec<Vec<u8>> {
 
         while sub + 8 <= limit {
             let cid = u32::from_be_bytes([
-                pck_data[sub], pck_data[sub + 1], pck_data[sub + 2], pck_data[sub + 3],
+                pck_data[sub],
+                pck_data[sub + 1],
+                pck_data[sub + 2],
+                pck_data[sub + 3],
             ]);
             let csize = u32::from_le_bytes([
-                pck_data[sub + 4], pck_data[sub + 5], pck_data[sub + 6], pck_data[sub + 7],
+                pck_data[sub + 4],
+                pck_data[sub + 5],
+                pck_data[sub + 6],
+                pck_data[sub + 7],
             ]) as usize;
 
             if !first_block && (cid == chunk_id::BKHD || cid == chunk_id::STID) {
@@ -227,8 +238,10 @@ pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
     }
 
     let count = u32::from_le_bytes([
-        bank_data[hirc_off + 8], bank_data[hirc_off + 9],
-        bank_data[hirc_off + 10], bank_data[hirc_off + 11],
+        bank_data[hirc_off + 8],
+        bank_data[hirc_off + 9],
+        bank_data[hirc_off + 10],
+        bank_data[hirc_off + 11],
     ]) as usize;
 
     let mut pos = hirc_off + 12;
@@ -243,12 +256,16 @@ pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
 
         let obj_type = bank_data[pos];
         let dw_section_size = u32::from_le_bytes([
-            bank_data[pos + 1], bank_data[pos + 2],
-            bank_data[pos + 3], bank_data[pos + 4],
+            bank_data[pos + 1],
+            bank_data[pos + 2],
+            bank_data[pos + 3],
+            bank_data[pos + 4],
         ]) as usize;
         let _obj_id = u32::from_le_bytes([
-            bank_data[pos + 5], bank_data[pos + 6],
-            bank_data[pos + 7], bank_data[pos + 8],
+            bank_data[pos + 5],
+            bank_data[pos + 6],
+            bank_data[pos + 7],
+            bank_data[pos + 8],
         ]);
 
         // 类型特定数据: 从 obj_id 之后 (pos+9)，长度 = dwSectionSize - 4
@@ -443,8 +460,10 @@ pub fn collect_hirc_mappings(
     }
 
     let count = u32::from_le_bytes([
-        bank_data[hirc_off + 8], bank_data[hirc_off + 9],
-        bank_data[hirc_off + 10], bank_data[hirc_off + 11],
+        bank_data[hirc_off + 8],
+        bank_data[hirc_off + 9],
+        bank_data[hirc_off + 10],
+        bank_data[hirc_off + 11],
     ]) as usize;
 
     let mut pos = hirc_off + 12;
@@ -456,12 +475,16 @@ pub fn collect_hirc_mappings(
 
         let obj_type = bank_data[pos];
         let dw_section_size = u32::from_le_bytes([
-            bank_data[pos + 1], bank_data[pos + 2],
-            bank_data[pos + 3], bank_data[pos + 4],
+            bank_data[pos + 1],
+            bank_data[pos + 2],
+            bank_data[pos + 3],
+            bank_data[pos + 4],
         ]) as usize;
         let obj_sid = u32::from_le_bytes([
-            bank_data[pos + 5], bank_data[pos + 6],
-            bank_data[pos + 7], bank_data[pos + 8],
+            bank_data[pos + 5],
+            bank_data[pos + 6],
+            bank_data[pos + 7],
+            bank_data[pos + 8],
         ]);
 
         let data_start = pos + 9;
@@ -480,9 +503,8 @@ pub fn collect_hirc_mappings(
                 // CAkAction: ulActionType:u16 在 +0, idExt:u32 在 +2
                 // 只取 CAkActionPlay (ulActionType == 0x0403)
                 if data_len >= 6 {
-                    let action_type = u16::from_le_bytes([
-                        bank_data[data_start], bank_data[data_start + 1],
-                    ]);
+                    let action_type =
+                        u16::from_le_bytes([bank_data[data_start], bank_data[data_start + 1]]);
                     if action_type == 0x0403 {
                         let sound_sid = read_u32_le(&bank_data[data_start + 2..]);
                         if sound_sid != 0 {
@@ -494,8 +516,7 @@ pub fn collect_hirc_mappings(
             0x04 => {
                 // CAkEvent: type_data 以 var(ulActionListSize) 开头，后跟 ulActionID[]
                 if data_len >= 1 {
-                    let (action_count, var_bytes) =
-                        read_var_u32(&bank_data[data_start..]);
+                    let (action_count, var_bytes) = read_var_u32(&bank_data[data_start..]);
                     if action_count > 0 {
                         let list_start = data_start + var_bytes;
                         let available = data_end.saturating_sub(list_start) / 4;
@@ -542,7 +563,8 @@ mod tests {
     /// 验证 CAkSound 解析能从真实数据读出 wem_id
     #[test]
     fn test_parse_caksound_wem_id() {
-        let pck_path = "D:/WBUnpacker/variants/Chs/raw-assets/sound/Windows/d/English(US)/dx_10001110.pck";
+        let pck_path =
+            "D:/WBUnpacker/variants/Chs/raw-assets/sound/Windows/d/English(US)/dx_10001110.pck";
         let pck_data = std::fs::read(pck_path).expect("请先下载 pck 文件");
         let banks = extract_banks_from_pck(&pck_data);
         assert!(!banks.is_empty());
@@ -551,13 +573,28 @@ mod tests {
         let mut found_wem = false;
         for bank in &banks {
             let hirc = find_chunk(bank, chunk_id::HIRC).unwrap();
-            let count = u32::from_le_bytes([bank[hirc+8], bank[hirc+9], bank[hirc+10], bank[hirc+11]]) as usize;
+            let count = u32::from_le_bytes([
+                bank[hirc + 8],
+                bank[hirc + 9],
+                bank[hirc + 10],
+                bank[hirc + 11],
+            ]) as usize;
             let mut pos = hirc + 12;
             for _ in 0..count {
                 let t = bank[pos];
-                let len = u32::from_le_bytes([bank[pos+1], bank[pos+2], bank[pos+3], bank[pos+4]]) as usize;
+                let len = u32::from_le_bytes([
+                    bank[pos + 1],
+                    bank[pos + 2],
+                    bank[pos + 3],
+                    bank[pos + 4],
+                ]) as usize;
                 if t == 0x02 && len >= 13 {
-                    let wem_id = u32::from_le_bytes([bank[pos+14], bank[pos+15], bank[pos+16], bank[pos+17]]);
+                    let wem_id = u32::from_le_bytes([
+                        bank[pos + 14],
+                        bank[pos + 15],
+                        bank[pos + 16],
+                        bank[pos + 17],
+                    ]);
                     assert!(wem_id > 0x100000, "wem_id 应在 Wwise 范围内: {}", wem_id);
                     found_wem = true;
                 }

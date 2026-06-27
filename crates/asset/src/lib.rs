@@ -63,7 +63,11 @@ impl<R: Read + Seek> AssetBundleDecryptor<R> {
             }
         }
 
-        Ok(Self { inner, keystream, position: 0 })
+        Ok(Self {
+            inner,
+            keystream,
+            position: 0,
+        })
     }
 
     pub fn decrypt_to(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -155,7 +159,7 @@ pub fn hardlink_or_skip(src: &Path, dst: &Path) -> std::io::Result<bool> {
 
 /// 计算文件 CRC-64/ECMA-182 校验和
 fn crc64_file(path: &Path) -> std::io::Result<u64> {
-    use crc::{Crc, CRC_64_ECMA_182};
+    use crc::{CRC_64_ECMA_182, Crc};
     let crc64 = Crc::<u64>::new(&CRC_64_ECMA_182);
     let mut digest = crc64.digest();
     let mut file = std::fs::File::open(path)?;
@@ -182,17 +186,24 @@ pub async fn download_asset(
 ) -> anyhow::Result<DownloadResult> {
     if dest_path.exists() {
         let size = std::fs::metadata(dest_path).map(|m| m.len()).unwrap_or(0);
-        return Ok(DownloadResult { path: dest_path.display().to_string(), size });
+        return Ok(DownloadResult {
+            path: dest_path.display().to_string(),
+            size,
+        });
     }
 
     let url = build_download_url(hash, cdn_template);
     tracing::debug!("下载: {url}");
 
-    let response = reqwest::get(&url).await
+    let response = reqwest::get(&url)
+        .await
         .with_context(|| format!("下载请求失败: {url}"))?;
 
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!("下载失败: HTTP {} — {url}", response.status().as_u16()));
+        return Err(anyhow::anyhow!(
+            "下载失败: HTTP {} — {url}",
+            response.status().as_u16()
+        ));
     }
 
     let bytes = response.bytes().await.context("读取响应体失败")?;
@@ -205,7 +216,10 @@ pub async fn download_asset(
     std::fs::write(dest_path, &bytes)
         .with_context(|| format!("无法写入文件: {}", dest_path.display()))?;
 
-    Ok(DownloadResult { path: dest_path.display().to_string(), size: bytes.len() as u64 })
+    Ok(DownloadResult {
+        path: dest_path.display().to_string(),
+        size: bytes.len() as u64,
+    })
 }
 
 /// 解密加密的 AssetBundle，输出到指定路径
@@ -260,10 +274,10 @@ pub async fn batch_download(
     blobs_dir: &Path,
     variant_dir: &Path,
 ) -> anyhow::Result<BatchStats> {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
-    use tokio::sync::Semaphore;
     use indicatif::{ProgressBar, ProgressStyle};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use tokio::sync::Semaphore;
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let done = Arc::new(AtomicUsize::new(0));
@@ -276,7 +290,7 @@ pub async fn batch_download(
     let pb = ProgressBar::new(total as u64);
     pb.set_style(
         ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}"
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}",
         )
         .unwrap()
         .progress_chars("##-"),
@@ -284,7 +298,10 @@ pub async fn batch_download(
 
     tracing::info!(
         "批量处理: {} AssetBundle + {} RawAsset, 共 {} 个, 并发 {}",
-        m.assets.len(), m.raw_assets.len(), total, concurrency
+        m.assets.len(),
+        m.raw_assets.len(),
+        total,
+        concurrency
     );
 
     let blobs_raw = blobs_dir.join("raw");
@@ -304,7 +321,10 @@ pub async fn batch_download(
         let blob_raw_path = blob_path(&blobs_raw, "", &hash);
         let blob_dec_path = blob_path(&blobs_decrypted, "", &hash);
         let link_raw = variant_dir.join("raw").join(&name);
-        let link_dec = variant_dir.join("decrypted").join(&name).with_extension("ab");
+        let link_dec = variant_dir
+            .join("decrypted")
+            .join(&name)
+            .with_extension("ab");
         let sem = semaphore.clone();
         let d = done.clone();
         let s = skipped.clone();
@@ -330,7 +350,9 @@ pub async fn batch_download(
 
             if !blob_raw_path.exists() {
                 match download_asset(&hash, &cdn, &blob_raw_path).await {
-                    Ok(r) => { db.fetch_add(r.size, Ordering::Relaxed); }
+                    Ok(r) => {
+                        db.fetch_add(r.size, Ordering::Relaxed);
+                    }
                     Err(e) => {
                         tracing::error!("下载失败 {}: {e}", name);
                         f.fetch_add(1, Ordering::Relaxed);
@@ -381,7 +403,10 @@ pub async fn batch_download(
 
         tasks.push(tokio::spawn(async move {
             if link_raw_asset.exists()
-                && std::fs::metadata(&link_raw_asset).map(|m| m.len()).unwrap_or(0) == raw_size
+                && std::fs::metadata(&link_raw_asset)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    == raw_size
             {
                 s.fetch_add(1, Ordering::Relaxed);
                 pb.inc(1);
@@ -393,7 +418,9 @@ pub async fn batch_download(
 
             if !blob_raw_path.exists() {
                 match download_asset(&hash, &cdn, &blob_raw_path).await {
-                    Ok(r) => { db.fetch_add(r.size, Ordering::Relaxed); }
+                    Ok(r) => {
+                        db.fetch_add(r.size, Ordering::Relaxed);
+                    }
                     Err(e) => {
                         tracing::error!("RawAsset 下载失败 {}: {e}", name);
                         f.fetch_add(1, Ordering::Relaxed);

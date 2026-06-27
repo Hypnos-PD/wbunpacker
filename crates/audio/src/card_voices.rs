@@ -49,11 +49,11 @@ use crate::{extract_wem, parse_akpk, wav_to_mp3, wem_to_wav};
 /// CardResourceMaster 中各列对应的语音 slot 基类
 /// 索引从 0 开始，值经过 classify_* 函数后可能变成带 ID 的动态 slot 名
 const VOICE_COLUMNS: &[(usize, &str)] = &[
-    (43, "play"),       // Play_dx_{prefix}_1, Play_dx_{prefix}_1_enh, ...
-    (45, "attack"),     // Play_dx_{prefix}_2
+    (43, "play"),   // Play_dx_{prefix}_1, Play_dx_{prefix}_1_enh, ...
+    (45, "attack"), // Play_dx_{prefix}_2
     (46, "evo_attack"),
-    (47, "evolve"),     // Play_dx_{prefix}_4, Play_dx_{prefix}_4_sp
-    (48, "destroy"),    // Play_dx_{prefix}_3
+    (47, "evolve"),  // Play_dx_{prefix}_4, Play_dx_{prefix}_4_sp
+    (48, "destroy"), // Play_dx_{prefix}_3
     (49, "evo_destroy"),
     (50, "skill"),
     (51, "evo_skill"),
@@ -61,10 +61,7 @@ const VOICE_COLUMNS: &[(usize, &str)] = &[
 ];
 
 /// 语言 → pck 子目录映射
-const LANG_DIRS: &[(&str, &str)] = &[
-    ("eng", "English(US)"),
-    ("jpn", "Japanese(JP)"),
-];
+const LANG_DIRS: &[(&str, &str)] = &[("eng", "English(US)"), ("jpn", "Japanese(JP)")];
 
 /// Play 后缀分类规则: (suffix, slot_name)
 /// 这些是静态映射的后缀，不含 ID 项
@@ -82,16 +79,32 @@ const PLAY_SUFFIX_RULES: &[(&str, &str)] = &[
 /// slot 显示顺序（参照 W2AU 的 SLOT_ORDER）
 const SLOT_ORDER: &[(&str, u32)] = &[
     ("play", 0),
-    ("play_enhance", 1), ("play_enhance_4", 2), ("play_enhance_7", 3), ("play_enhance_8", 4),
-    ("play_sky", 5), ("play_super_sky", 6),
-    ("play_mode1", 7), ("play_mode2", 8), ("play_mode3", 9), ("play_mode4", 10),
-    ("play_lottery", 11), ("play_skill", 12), ("play_cross", 13), ("play_pair", 14),
+    ("play_enhance", 1),
+    ("play_enhance_4", 2),
+    ("play_enhance_7", 3),
+    ("play_enhance_8", 4),
+    ("play_sky", 5),
+    ("play_super_sky", 6),
+    ("play_mode1", 7),
+    ("play_mode2", 8),
+    ("play_mode3", 9),
+    ("play_mode4", 10),
+    ("play_lottery", 11),
+    ("play_skill", 12),
+    ("play_cross", 13),
+    ("play_pair", 14),
     ("play_token", 15),
-    ("attack", 20), ("evo_attack", 21),
-    ("evolve", 30), ("super_evolve", 31),
-    ("destroy", 40), ("evo_destroy", 41),
-    ("skill", 50), ("evo_skill", 51),
-    ("act", 60), ("act_mode1", 61), ("act_mode2", 62),
+    ("attack", 20),
+    ("evo_attack", 21),
+    ("evolve", 30),
+    ("super_evolve", 31),
+    ("destroy", 40),
+    ("evo_destroy", 41),
+    ("skill", 50),
+    ("evo_skill", 51),
+    ("act", 60),
+    ("act_mode1", 61),
+    ("act_mode2", 62),
 ];
 
 // ============================================================================
@@ -101,39 +114,135 @@ const SLOT_ORDER: &[(&str, u32)] = &[
 fn slot_labels() -> BTreeMap<&'static str, SlotLabel> {
     let mut m = BTreeMap::new();
     m.insert("play", lbl("打出", "Play", "登場", "등장", "登場"));
-    m.insert("play_enhance", lbl("爆能", "Enhance", "エンハンス", "인핸스", "爆能"));
-    m.insert("play_enhance_4", lbl("爆能(4)", "Enhance(4)", "エンハンス(4)", "인핸스(4)", "爆能(4)"));
-    m.insert("play_enhance_7", lbl("爆能(7)", "Enhance(7)", "エンハンス(7)", "인핸스(7)", "爆能(7)"));
-    m.insert("play_enhance_8", lbl("爆能(8)", "Enhance(8)", "エンハンス(8)", "인핸스(8)", "爆能(8)"));
+    m.insert(
+        "play_enhance",
+        lbl("爆能", "Enhance", "エンハンス", "인핸스", "爆能"),
+    );
+    m.insert(
+        "play_enhance_4",
+        lbl(
+            "爆能(4)",
+            "Enhance(4)",
+            "エンハンス(4)",
+            "인핸스(4)",
+            "爆能(4)",
+        ),
+    );
+    m.insert(
+        "play_enhance_7",
+        lbl(
+            "爆能(7)",
+            "Enhance(7)",
+            "エンハンス(7)",
+            "인핸스(7)",
+            "爆能(7)",
+        ),
+    );
+    m.insert(
+        "play_enhance_8",
+        lbl(
+            "爆能(8)",
+            "Enhance(8)",
+            "エンハンス(8)",
+            "인핸스(8)",
+            "爆能(8)",
+        ),
+    );
     m.insert("play_sky", lbl("奥义", "Sky", "奥義", "오의", "奧義"));
-    m.insert("play_super_sky", lbl("解放奥义", "Super Sky", "解放奥義", "해방 오의", "解放奧義"));
-    m.insert("play_mode1", lbl("模式1", "Mode 1", "モード1", "모드1", "模式1"));
-    m.insert("play_mode2", lbl("模式2", "Mode 2", "モード2", "모드2", "模式2"));
-    m.insert("play_mode3", lbl("模式3", "Mode 3", "モード3", "모드3", "模式3"));
-    m.insert("play_mode4", lbl("模式4", "Mode 4", "モード4", "모드4", "模式4"));
-    m.insert("play_lottery", lbl("抽卡", "Lottery", "カード排出", "카드뽑기", "抽卡"));
+    m.insert(
+        "play_super_sky",
+        lbl("解放奥义", "Super Sky", "解放奥義", "해방 오의", "解放奧義"),
+    );
+    m.insert(
+        "play_mode1",
+        lbl("模式1", "Mode 1", "モード1", "모드1", "模式1"),
+    );
+    m.insert(
+        "play_mode2",
+        lbl("模式2", "Mode 2", "モード2", "모드2", "模式2"),
+    );
+    m.insert(
+        "play_mode3",
+        lbl("模式3", "Mode 3", "モード3", "모드3", "模式3"),
+    );
+    m.insert(
+        "play_mode4",
+        lbl("模式4", "Mode 4", "モード4", "모드4", "模式4"),
+    );
+    m.insert(
+        "play_lottery",
+        lbl("抽卡", "Lottery", "カード排出", "카드뽑기", "抽卡"),
+    );
     m.insert("play_skill", lbl("技能", "Skill", "スキル", "스킬", "技能"));
     m.insert("play_cross", lbl("关联", "Cross", "関連", "관련", "關聯"));
     m.insert("play_pair", lbl("联动", "Pair", "関連", "관련", "聯動"));
-    m.insert("play_token", lbl("Token", "Token", "トークン", "토큰", "Token"));
+    m.insert(
+        "play_token",
+        lbl("Token", "Token", "トークン", "토큰", "Token"),
+    );
     m.insert("attack", lbl("攻击", "Attack", "攻撃", "공격", "攻擊"));
-    m.insert("evo_attack", lbl("进化攻击", "Evo Attack", "進化攻撃", "진화 공격", "進化攻擊"));
+    m.insert(
+        "evo_attack",
+        lbl(
+            "进化攻击",
+            "Evo Attack",
+            "進化攻撃",
+            "진화 공격",
+            "進化攻擊",
+        ),
+    );
     m.insert("evolve", lbl("进化", "Evolve", "進化", "진화", "進化"));
-    m.insert("super_evolve", lbl("超进化", "Super Evolve", "超進化", "초진화", "超進化"));
+    m.insert(
+        "super_evolve",
+        lbl("超进化", "Super Evolve", "超進化", "초진화", "超進化"),
+    );
     m.insert("destroy", lbl("破坏", "Destroy", "破壊", "파괴", "破壞"));
-    m.insert("evo_destroy", lbl("进化破坏", "Evo Destroy", "進化破壊", "진화 파괴", "進化破壞"));
+    m.insert(
+        "evo_destroy",
+        lbl(
+            "进化破坏",
+            "Evo Destroy",
+            "進化破壊",
+            "진화 파괴",
+            "進化破壞",
+        ),
+    );
     m.insert("skill", lbl("技能", "Skill", "スキル", "스킬", "技能"));
-    m.insert("evo_skill", lbl("进化技能", "Evo Skill", "進化スキル", "진화 스킬", "進化技能"));
+    m.insert(
+        "evo_skill",
+        lbl(
+            "进化技能",
+            "Evo Skill",
+            "進化スキル",
+            "진화 스킬",
+            "進化技能",
+        ),
+    );
     m.insert("act", lbl("行动", "Act", "行動", "행동", "行動"));
-    m.insert("act_mode1", lbl("行动模式1", "Act Mode 1", "行動モード1", "행동 모드1", "行動模式1"));
-    m.insert("act_mode2", lbl("行动模式2", "Act Mode 2", "行動モード2", "kor", "行動模式2"));
+    m.insert(
+        "act_mode1",
+        lbl(
+            "行动模式1",
+            "Act Mode 1",
+            "行動モード1",
+            "행동 모드1",
+            "行動模式1",
+        ),
+    );
+    m.insert(
+        "act_mode2",
+        lbl("行动模式2", "Act Mode 2", "行動モード2", "kor", "行動模式2"),
+    );
     m
 }
 
 fn lbl(chs: &str, eng: &str, jpn: &str, kor: &str, cht: &str) -> SlotLabel {
     SlotLabel {
-        chs: chs.into(), eng: eng.into(), jpn: jpn.into(),
-        kor: kor.into(), cht: cht.into(),
+        chs: chs.into(),
+        eng: eng.into(),
+        jpn: jpn.into(),
+        kor: kor.into(),
+        cht: cht.into(),
     }
 }
 
@@ -175,9 +284,11 @@ pub struct CardVoiceStats {
 /// 从 CardResourceMaster 构建 prefix → voice slots 映射。
 ///
 /// slot 名为动态生成的完整名称，如 `play_pair_10721110` 而非坍缩的 `play_pair`。
-pub fn build_voice_map(card_resource_path: &Path) -> anyhow::Result<BTreeMap<String, BTreeMap<String, Vec<String>>>> {
-    let json = std::fs::read_to_string(card_resource_path)
-        .context("无法读取 CardResourceMaster.json")?;
+pub fn build_voice_map(
+    card_resource_path: &Path,
+) -> anyhow::Result<BTreeMap<String, BTreeMap<String, Vec<String>>>> {
+    let json =
+        std::fs::read_to_string(card_resource_path).context("无法读取 CardResourceMaster.json")?;
     let data: Vec<Vec<serde_json::Value>> = serde_json::from_str(&json)?;
 
     let mut result: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
@@ -196,7 +307,8 @@ pub fn build_voice_map(card_resource_path: &Path) -> anyhow::Result<BTreeMap<Str
             if val.is_empty() {
                 continue;
             }
-            let events: Vec<String> = val.split(',')
+            let events: Vec<String> = val
+                .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| s.starts_with("Play_dx_"))
                 .collect();
@@ -216,13 +328,21 @@ pub fn build_voice_map(card_resource_path: &Path) -> anyhow::Result<BTreeMap<Str
                 }
                 "evolve" => {
                     for evt in &events {
-                        let slot = if evt.contains("_sp") { "super_evolve".to_string() } else { "evolve".to_string() };
+                        let slot = if evt.contains("_sp") {
+                            "super_evolve".to_string()
+                        } else {
+                            "evolve".to_string()
+                        };
                         slots.entry(slot).or_default().push(evt.clone());
                     }
                 }
                 "skill" => {
                     for evt in &events {
-                        let slot = if evt.contains("_evo") { "evo_skill".to_string() } else { "skill".to_string() };
+                        let slot = if evt.contains("_evo") {
+                            "evo_skill".to_string()
+                        } else {
+                            "skill".to_string()
+                        };
                         slots.entry(slot).or_default().push(evt.clone());
                     }
                 }
@@ -236,7 +356,10 @@ pub fn build_voice_map(card_resource_path: &Path) -> anyhow::Result<BTreeMap<Str
                     }
                 }
                 _ => {
-                    slots.entry(base_slot.to_string()).or_default().extend(events.clone());
+                    slots
+                        .entry(base_slot.to_string())
+                        .or_default()
+                        .extend(events.clone());
                 }
             }
         }
@@ -292,7 +415,7 @@ pub fn extract_card_voices(
         pb.set_style(
             ProgressStyle::with_template("{spinner} [{bar:30}] {pos}/{len} {msg}")
                 .unwrap()
-                .progress_chars("=> ")
+                .progress_chars("=> "),
         );
 
         let mut lang_cards: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -307,8 +430,15 @@ pub fn extract_card_voices(
             }
 
             match process_card_pck(
-                &pck_path, slots, lang, prefix, output_dir,
-                audio_wav_dir, vgmstream_path, ffmpeg_path, &event_table,
+                &pck_path,
+                slots,
+                lang,
+                prefix,
+                output_dir,
+                audio_wav_dir,
+                vgmstream_path,
+                ffmpeg_path,
+                &event_table,
             ) {
                 Ok((card_slots, skipped)) => {
                     stats.files_skipped += skipped;
@@ -340,14 +470,19 @@ pub fn extract_card_voices(
         if voice_index.labels.contains_key(slot) {
             continue;
         }
-        voice_index.labels.insert(slot.clone(), make_slot_label(slot, &base_labels));
+        voice_index
+            .labels
+            .insert(slot.clone(), make_slot_label(slot, &base_labels));
     }
 
     let index_path = output_dir.join("voice_index.json");
     let json = serde_json::to_string_pretty(&voice_index)?;
     std::fs::write(&index_path, json)?;
     println!("\nvoice_index.json → {}", index_path.display());
-    println!("总计: {} 张卡, {} 个 MP3 (跳过: {})", stats.cards_processed, stats.files_output, stats.files_skipped);
+    println!(
+        "总计: {} 张卡, {} 个 MP3 (跳过: {})",
+        stats.cards_processed, stats.files_output, stats.files_skipped
+    );
 
     Ok(stats)
 }
@@ -389,7 +524,12 @@ fn process_card_pck(
 
     let banks = extract_banks_from_pck(&pck_data);
     for bank in &banks {
-        collect_hirc_mappings(bank, &mut wem_to_sound, &mut sound_to_action, &mut action_to_event);
+        collect_hirc_mappings(
+            bank,
+            &mut wem_to_sound,
+            &mut sound_to_action,
+            &mut action_to_event,
+        );
     }
 
     let mut wem_to_name: BTreeMap<u32, String> = BTreeMap::new();
@@ -453,7 +593,11 @@ fn process_card_pck(
         // 1) 尝试复用 wbu audio 已提取的 WAV
         let wav_source = event_name.and_then(|name| {
             let wav_path = audio_wav_dir.join(lang).join(format!("{}.wav", name));
-            if wav_path.exists() { Some(wav_path) } else { None }
+            if wav_path.exists() {
+                Some(wav_path)
+            } else {
+                None
+            }
         });
 
         // 2) 回退：从 pck 提取 WEM → 临时 WAV
@@ -466,15 +610,23 @@ fn process_card_pck(
                         Ok(()) => Some(tmp),
                         Err(_) => None,
                     }
-                } else { None }
-            } else { None }
-        } else { None };
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // 3) WAV → MP3
         let source_wav = wav_source.as_ref().or(tmp_wav.as_ref());
         if let Some(wav_path) = source_wav {
             if wav_to_mp3(wav_path, &mp3_path, ffmpeg_path).is_ok() {
-                if let Some(ref tmp) = tmp_wav { let _ = std::fs::remove_file(tmp); }
+                if let Some(ref tmp) = tmp_wav {
+                    let _ = std::fs::remove_file(tmp);
+                }
                 result.insert(slot.clone(), format!("{}/{}/{}.mp3", lang, prefix, slot));
             }
         } else if need_tmp {
@@ -509,11 +661,21 @@ fn process_card_pck(
 /// - `1_mode2` → `play_mode2`
 fn classify_play_suffix(suffix: &str) -> String {
     // 优先匹配带 ID 的动态后缀
-    if suffix.starts_with("9_") { return format!("play_pair_{}", &suffix[2..]); }
-    if suffix.starts_with("7_") { return format!("play_cross_{}", &suffix[2..]); }
-    if suffix.starts_with("8_") || suffix.starts_with("11_") { return format!("play_token_{}", &suffix[2..]); }
-    if suffix.starts_with("1_skill_") { return format!("play_skill_{}", &suffix[8..]); }
-    if suffix.starts_with("1_mode") { return format!("play_mode{}", &suffix[6..]); }
+    if suffix.starts_with("9_") {
+        return format!("play_pair_{}", &suffix[2..]);
+    }
+    if suffix.starts_with("7_") {
+        return format!("play_cross_{}", &suffix[2..]);
+    }
+    if suffix.starts_with("8_") || suffix.starts_with("11_") {
+        return format!("play_token_{}", &suffix[2..]);
+    }
+    if suffix.starts_with("1_skill_") {
+        return format!("play_skill_{}", &suffix[8..]);
+    }
+    if suffix.starts_with("1_mode") {
+        return format!("play_mode{}", &suffix[6..]);
+    }
 
     // 静态规则
     for &(key, slot) in PLAY_SUFFIX_RULES {
@@ -526,7 +688,9 @@ fn classify_play_suffix(suffix: &str) -> String {
 
 /// 分类 Act 事件的后缀 → slot 名。
 fn classify_act_suffix(suffix: &str) -> String {
-    if suffix.starts_with("10_mode") { return format!("act_mode{}", &suffix[7..]); }
+    if suffix.starts_with("10_mode") {
+        return format!("act_mode{}", &suffix[7..]);
+    }
     "act".to_string()
 }
 
@@ -536,7 +700,8 @@ fn classify_act_suffix(suffix: &str) -> String {
 
 /// slot 排序键：基类顺序 → 变体后缀数字 → 名称
 fn slot_sort_key(slot: &str) -> (u32, u32, &str) {
-    let base_order = SLOT_ORDER.iter()
+    let base_order = SLOT_ORDER
+        .iter()
         .find(|&&(b, _)| slot == b || slot.starts_with(&format!("{}_", b)))
         .map(|&(_, o)| o)
         .unwrap_or(99);
@@ -563,7 +728,10 @@ fn make_slot_label(slot: &str, base_labels: &BTreeMap<&'static str, SlotLabel>) 
 
     // 尝试匹配变体 slot: play_pair_10721110 → base="play_pair", suffix="10721110"
     for (base, _) in SLOT_ORDER {
-        if slot.starts_with(base) && slot.len() > base.len() + 1 && slot.as_bytes()[base.len()] == b'_' {
+        if slot.starts_with(base)
+            && slot.len() > base.len() + 1
+            && slot.as_bytes()[base.len()] == b'_'
+        {
             let suffix = &slot[base.len() + 1..];
             if let Some(base_lbl) = base_labels.get(base) {
                 return SlotLabel {
@@ -580,7 +748,10 @@ fn make_slot_label(slot: &str, base_labels: &BTreeMap<&'static str, SlotLabel>) 
 
     // 兜底
     SlotLabel {
-        chs: slot.to_string(), eng: slot.to_string(),
-        jpn: slot.to_string(), kor: slot.to_string(), cht: slot.to_string(),
+        chs: slot.to_string(),
+        eng: slot.to_string(),
+        jpn: slot.to_string(),
+        kor: slot.to_string(),
+        cht: slot.to_string(),
     }
 }
