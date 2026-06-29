@@ -447,15 +447,16 @@ pub fn generate_pack_names(
 
             if let Some(pack_id) = key.strip_prefix("CPN_")
                 && let Ok(id_num) = pack_id.parse::<u32>()
-                    && (10000..=10007).contains(&id_num) {
-                        let entry = pack_names
-                            .entry(pack_id.to_string())
-                            .or_insert_with(|| serde_json::json!({}));
-                        if let Some(obj) = entry.as_object_mut() {
-                            let clean = val.split('[').next().unwrap_or(val).trim().to_string();
-                            obj.insert(lang_key.to_string(), serde_json::Value::String(clean));
-                        }
-                    }
+                && (10000..=10099).contains(&id_num)
+            {
+                let entry = pack_names
+                    .entry(pack_id.to_string())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(obj) = entry.as_object_mut() {
+                    let clean = val.split('[').next().unwrap_or(val).trim().to_string();
+                    obj.insert(lang_key.to_string(), serde_json::Value::String(clean));
+                }
+            }
         }
     }
 
@@ -474,6 +475,11 @@ pub fn generate_pack_names(
 /// - output_path: emblems_full.json 输出路径
 pub fn generate_emblems_full(master_data_dir: &Path, output_path: &Path) -> anyhow::Result<usize> {
     use std::collections::HashMap;
+
+    const EMBLEM_CATEGORY_COLUMN: usize = 5;
+    const EMBLEM_PARENT_COLUMN: usize = 6;
+    const EMBLEM_CARD_STYLE_COLUMN: usize = 7;
+    const EMBLEM_PREMIUM_COLUMN: usize = 8;
 
     let chs_dir = master_data_dir.join("Chs");
     let emblem_master: Vec<Vec<serde_json::Value>> =
@@ -544,9 +550,10 @@ pub fn generate_emblems_full(master_data_dir: &Path, output_path: &Path) -> anyh
         }
         let name_jpn = row[2].as_str().unwrap_or("").to_string();
         let resource_name = row[3].as_str().unwrap_or("").to_string();
-        let category = row[4].as_i64().unwrap_or(0);
-        let parent_id = row[5].as_i64().unwrap_or(0);
-        let is_premium = row[7].as_i64().unwrap_or(0) == 1;
+        let category = row[EMBLEM_CATEGORY_COLUMN].as_i64().unwrap_or(0);
+        let parent_id = row[EMBLEM_PARENT_COLUMN].as_i64().unwrap_or(0);
+        let card_style_id = row[EMBLEM_CARD_STYLE_COLUMN].as_i64().unwrap_or(0);
+        let is_premium = row[EMBLEM_PREMIUM_COLUMN].as_i64().unwrap_or(0) == 1;
 
         // 分类名（5 语言）
         let cat_chs = get_cat_text("Chs", category);
@@ -555,9 +562,7 @@ pub fn generate_emblems_full(master_data_dir: &Path, output_path: &Path) -> anyh
         let cat_kor = get_cat_text("Kor", category);
         let cat_cht = get_cat_text("Cht", category);
 
-        // 关联卡牌: 用 emblem_id 或 parent_id 作为 card_style_id
-        let lookup_id = if parent_id != 0 { parent_id } else { emblem_id };
-        let card = card_index.get(&lookup_id);
+        let card = card_index.get(&card_style_id);
 
         entries.push(EmblemFullEntry {
             emblem_id,
@@ -814,6 +819,7 @@ struct StampFullEntry {
 mod tests {
     use super::*;
     use rmpv::encode;
+    use serde_json::json;
 
     #[test]
     fn test_parse_toc() {
@@ -835,5 +841,117 @@ mod tests {
         assert!(toc_end > 0);
         assert_eq!(tables.len(), 1);
         assert_eq!(tables["TestTable"], (0, 10));
+    }
+
+    #[test]
+    fn generate_emblems_full_resolves_card_from_current_columns() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let master_dir = temp_dir.path().join("master-data");
+        let output_dir = temp_dir.path().join("analysis");
+        let chs_dir = master_dir.join("Chs");
+        std::fs::create_dir_all(&chs_dir)?;
+        for lang in ["Eng", "Jpn", "Kor", "Cht"] {
+            std::fs::create_dir_all(master_dir.join(lang))?;
+        }
+
+        std::fs::write(
+            chs_dir.join("EmblemMaster.json"),
+            serde_json::to_vec(&vec![json!([
+                100011100,
+                0,
+                "不屈のファイター",
+                "em_100011100",
+                "",
+                200,
+                0,
+                100011100,
+                0,
+                100011100
+            ])])?,
+        )?;
+        std::fs::write(
+            chs_dir.join("EmblemCategotyMaster.json"),
+            serde_json::to_vec(&Vec::<serde_json::Value>::new())?,
+        )?;
+        for lang in ["Chs", "Eng", "Jpn", "Kor", "Cht"] {
+            std::fs::write(
+                master_dir.join(lang).join("MasterTextLabel.json"),
+                serde_json::to_vec(&Vec::<serde_json::Value>::new())?,
+            )?;
+        }
+        std::fs::create_dir_all(&output_dir)?;
+        std::fs::write(
+            output_dir.join("cards_full.json"),
+            serde_json::to_vec(&vec![json!({
+                "card_id": 10001110,
+                "base_card_id": 10001110,
+                "card_style_id": 100011100,
+                "class": 0,
+                "cost": 1,
+                "rarity": 1,
+                "type_flags": 1,
+                "is_evolution": false,
+                "evolves_to": 10001111,
+                "skills": [],
+                "resource_id": 100011100,
+                "name_chs": "不屈的剑斗士",
+                "name_eng": "Indomitable Fighter",
+                "name_jpn": "不屈のファイター",
+                "name_kor": "불굴의 파이터",
+                "name_cht": "不屈的戰士",
+                "text_keys": {
+                    "name": "CN_10001110",
+                    "skill_desc": "SD_10001110",
+                    "flavor_1": "FT_10001110_1",
+                    "flavor_2": "FT_10001110_2",
+                    "cv": "CV_10001110"
+                }
+            })])?,
+        )?;
+
+        let output_path = output_dir.join("emblems_full.json");
+        generate_emblems_full(&master_dir, &output_path)?;
+        let output: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(output_path)?)?;
+
+        assert_eq!(output[0]["card_id"], json!(10001110));
+        assert_eq!(output[0]["card_name_chs"], json!("不屈的剑斗士"));
+        assert_eq!(output[0]["card_name_eng"], json!("Indomitable Fighter"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn generate_pack_names_includes_new_numeric_pack_ids() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let master_dir = temp_dir.path().join("master-data");
+        for lang in ["Chs", "Eng", "Jpn", "Kor", "Cht"] {
+            std::fs::create_dir_all(master_dir.join(lang))?;
+        }
+
+        for (lang, value) in [
+            ("Chs", "新卡包"),
+            ("Eng", "New Pack"),
+            ("Jpn", "新パック"),
+            ("Kor", "새 팩"),
+            ("Cht", "新卡包"),
+        ] {
+            std::fs::write(
+                master_dir.join(lang).join("MasterTextLabel.json"),
+                serde_json::to_vec(&vec![
+                    json!(["CPN_10008", value]),
+                    json!(["CPN_10100", "ignored"]),
+                    json!(["CPN_not_a_pack", "ignored"]),
+                ])?,
+            )?;
+        }
+
+        let pack_names = generate_pack_names(&master_dir)?;
+
+        assert_eq!(pack_names["10008"]["chs"], json!("新卡包"));
+        assert_eq!(pack_names["10008"]["eng"], json!("New Pack"));
+        assert!(!pack_names.contains_key("10100"));
+        assert!(!pack_names.contains_key("not_a_pack"));
+
+        Ok(())
     }
 }

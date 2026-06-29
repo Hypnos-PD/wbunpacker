@@ -635,7 +635,6 @@ fn extract_one(
         spine_skel.is_some(),
         has_effects,
     );
-
     let config_json = serde_json::to_string_pretty(&config)?;
     fs::write(output_dir.join("config.json"), config_json)?;
 
@@ -891,27 +890,21 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
     let root_transform = game_objects
         .iter()
         .filter(|(_, go)| go.name == stem)
-        .map(|(id, _)| *id)
+        .map(|(_, go)| go.transform_id)
         .min();
     let character_transform = transform_by_go_name(game_objects, "Character");
     let spine_root_transform = transform_by_go_name(game_objects, &format!("spine_{stem}"));
     let spine_object_transform = game_objects
         .iter()
         .filter(|(_, go)| go.name.starts_with("Spine GameObject"))
-        .map(|(id, _)| *id)
+        .map(|(_, go)| go.transform_id)
         .filter(|id| Some(*id) != root_transform)
         .min()
         .or(spine_root_transform);
     let bg_transform = transform_by_go_name(game_objects, &format!("bg_{stem}"))
         .or_else(|| transform_by_go_name(game_objects, "BG"));
 
-    add_transform_node(
-        "root",
-        root_transform,
-        game_objects,
-        transforms,
-        &mut nodes,
-    );
+    add_transform_node("root", root_transform, game_objects, transforms, &mut nodes);
     add_transform_node(
         "character",
         character_transform,
@@ -941,15 +934,16 @@ fn parse_prefab_transforms(stem: &str, files: &[PathBuf]) -> PrefabTransforms {
         &mut nodes,
     );
     if let Some(bg) = bg_transform.and_then(|id| transforms.get(&id))
-        && let Some(child_id) = bg.children.first().copied() {
-            add_transform_node(
-                "backgroundQuad",
-                Some(child_id),
-                game_objects,
-                transforms,
-                &mut nodes,
-            );
-        }
+        && let Some(child_id) = bg.children.first().copied()
+    {
+        add_transform_node(
+            "backgroundQuad",
+            Some(child_id),
+            game_objects,
+            transforms,
+            &mut nodes,
+        );
+    }
 
     let prefab_scale = spine_object_transform
         .map(|id| world_scale(id, transforms).x)
@@ -966,7 +960,7 @@ fn transform_by_go_name(game_objects: &HashMap<i64, DumpGameObject>, name: &str)
     game_objects
         .iter()
         .filter(|(_, go)| go.name == name)
-        .map(|(id, _)| *id)
+        .map(|(_, go)| go.transform_id)
         .min()
 }
 
@@ -978,7 +972,7 @@ fn transform_by_go_prefix(
     game_objects
         .iter()
         .filter(|(_, go)| go.name.starts_with(prefix))
-        .map(|(id, _)| *id)
+        .map(|(_, go)| go.transform_id)
         .min()
 }
 
@@ -1043,7 +1037,7 @@ fn build_layout_debug(
     let spine_object_transform = game_objects
         .iter()
         .filter(|(_, go)| go.name.starts_with("Spine GameObject"))
-        .map(|(id, _)| *id)
+        .map(|(_, go)| go.transform_id)
         .filter(|id| Some(*id) != root_transform)
         .min()
         .or(spine_root_transform);
@@ -1515,23 +1509,24 @@ fn build_config(
 
     let mut aspect_layouts = BTreeMap::new();
     if let Some(t) = transform
-        && let Some(defines) = t.get("_aspectDefines").and_then(|v| v.as_array()) {
-            for def in defines {
-                let aspect = def.get("_aspect").and_then(|v| v.as_f64()).unwrap_or(1.78);
-                let pos = def.get("_localPosition").unwrap();
-                let scale = def.get("_localScale").unwrap();
-                let label = aspect_label(aspect);
-                aspect_layouts.insert(
-                    label.to_string(),
-                    AspectLayout {
-                        x: pos.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        y: pos.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        scale_x: scale.get("x").and_then(|v| v.as_f64()).unwrap_or(1.0),
-                        scale_y: scale.get("y").and_then(|v| v.as_f64()).unwrap_or(1.0),
-                    },
-                );
-            }
+        && let Some(defines) = t.get("_aspectDefines").and_then(|v| v.as_array())
+    {
+        for def in defines {
+            let aspect = def.get("_aspect").and_then(|v| v.as_f64()).unwrap_or(1.78);
+            let pos = def.get("_localPosition").unwrap();
+            let scale = def.get("_localScale").unwrap();
+            let label = aspect_label(aspect);
+            aspect_layouts.insert(
+                label.to_string(),
+                AspectLayout {
+                    x: pos.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    y: pos.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    scale_x: scale.get("x").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                    scale_y: scale.get("y").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                },
+            );
         }
+    }
 
     IllustConfig {
         config_version: HOME_ILLUST_CONFIG_VERSION,

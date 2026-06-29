@@ -49,16 +49,18 @@ use crate::{extract_wem, parse_akpk, wav_to_mp3, wem_to_wav};
 /// CardResourceMaster 中各列对应的语音 slot 基类
 /// 索引从 0 开始，值经过 classify_* 函数后可能变成带 ID 的动态 slot 名
 const VOICE_COLUMNS: &[(usize, &str)] = &[
-    (43, "play"),   // Play_dx_{prefix}_1, Play_dx_{prefix}_1_enh, ...
-    (45, "attack"), // Play_dx_{prefix}_2
-    (46, "evo_attack"),
-    (47, "evolve"),  // Play_dx_{prefix}_4, Play_dx_{prefix}_4_sp
-    (48, "destroy"), // Play_dx_{prefix}_3
-    (49, "evo_destroy"),
-    (50, "skill"),
-    (51, "evo_skill"),
-    (52, "act"),
+    (39, "play"),   // Play_dx_{prefix}_1, Play_dx_{prefix}_1_enh, ...
+    (41, "attack"), // Play_dx_{prefix}_2
+    (42, "evo_attack"),
+    (43, "evolve"),  // Play_dx_{prefix}_3, Play_dx_{prefix}_3_sp
+    (45, "destroy"), // Play_dx_{prefix}_4
+    (46, "evo_destroy"),
+    (47, "destroy_token"),
+    (48, "skill"),
+    (49, "evo_skill"),
+    (50, "act"),
 ];
+const CARD_RESOURCE_SOUND_PREFIX_COLUMN: usize = 38;
 
 /// 语言 → pck 子目录映射
 const LANG_DIRS: &[(&str, &str)] = &[("eng", "English(US)"), ("jpn", "Japanese(JP)")];
@@ -66,6 +68,10 @@ const LANG_DIRS: &[(&str, &str)] = &[("eng", "English(US)"), ("jpn", "Japanese(J
 /// Play 后缀分类规则: (suffix, slot_name)
 /// 这些是静态映射的后缀，不含 ID 项
 const PLAY_SUFFIX_RULES: &[(&str, &str)] = &[
+    ("1_ehn8", "play_enhance_8"),
+    ("1_ehn7", "play_enhance_7"),
+    ("1_ehn4", "play_enhance_4"),
+    ("1_ehn", "play_enhance"),
     ("1_enh8", "play_enhance_8"),
     ("1_enh7", "play_enhance_7"),
     ("1_enh4", "play_enhance_4"),
@@ -100,6 +106,7 @@ const SLOT_ORDER: &[(&str, u32)] = &[
     ("super_evolve", 31),
     ("destroy", 40),
     ("evo_destroy", 41),
+    ("destroy_token", 42),
     ("skill", 50),
     ("evo_skill", 51),
     ("act", 60),
@@ -173,12 +180,27 @@ fn slot_labels() -> BTreeMap<&'static str, SlotLabel> {
         "play_lottery",
         lbl("抽卡", "Lottery", "カード排出", "카드뽑기", "抽卡"),
     );
-    m.insert("play_skill", lbl("技能", "Skill", "スキル", "스킬", "技能"));
-    m.insert("play_cross", lbl("关联", "Cross", "関連", "관련", "關聯"));
-    m.insert("play_pair", lbl("联动", "Pair", "関連", "관련", "聯動"));
+    m.insert(
+        "play_skill",
+        lbl(
+            "效果打出",
+            "Effect Play",
+            "効果登場",
+            "효과 등장",
+            "效果登場",
+        ),
+    );
+    m.insert("play_cross", lbl("联动", "Link", "リンク", "링크", "聯動"));
+    m.insert("play_pair", lbl("联动", "Link", "リンク", "링크", "聯動"));
     m.insert(
         "play_token",
-        lbl("Token", "Token", "トークン", "토큰", "Token"),
+        lbl(
+            "Token联动",
+            "Token Link",
+            "トークンリンク",
+            "토큰 링크",
+            "Token聯動",
+        ),
     );
     m.insert("attack", lbl("攻击", "Attack", "攻撃", "공격", "攻擊"));
     m.insert(
@@ -207,31 +229,47 @@ fn slot_labels() -> BTreeMap<&'static str, SlotLabel> {
             "進化破壞",
         ),
     );
-    m.insert("skill", lbl("技能", "Skill", "スキル", "스킬", "技能"));
+    m.insert(
+        "destroy_token",
+        lbl(
+            "破坏Token",
+            "Destroy Token",
+            "トークン破壊",
+            "토큰 파괴",
+            "破壞Token",
+        ),
+    );
+    m.insert("skill", lbl("效果", "Effect", "効果", "효과", "效果"));
     m.insert(
         "evo_skill",
         lbl(
-            "进化技能",
-            "Evo Skill",
-            "進化スキル",
-            "진화 스킬",
-            "進化技能",
+            "进化效果",
+            "Evo Effect",
+            "進化効果",
+            "진화 효과",
+            "進化效果",
         ),
     );
-    m.insert("act", lbl("行动", "Act", "行動", "행동", "行動"));
+    m.insert("act", lbl("启动", "Act", "アクト", "기동", "啟動"));
     m.insert(
         "act_mode1",
         lbl(
-            "行动模式1",
+            "启动模式1",
             "Act Mode 1",
-            "行動モード1",
-            "행동 모드1",
-            "行動模式1",
+            "アクトモード1",
+            "기동 모드1",
+            "啟動模式1",
         ),
     );
     m.insert(
         "act_mode2",
-        lbl("行动模式2", "Act Mode 2", "行動モード2", "kor", "行動模式2"),
+        lbl(
+            "启动模式2",
+            "Act Mode 2",
+            "起動モード2",
+            "기동 모드2",
+            "啟動模式2",
+        ),
     );
     m
 }
@@ -294,7 +332,10 @@ pub fn build_voice_map(
     let mut result: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
 
     for rec in &data {
-        let prefix_raw = rec.get(42).and_then(|v| v.as_str()).unwrap_or("");
+        let prefix_raw = rec
+            .get(CARD_RESOURCE_SOUND_PREFIX_COLUMN)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if !prefix_raw.starts_with("dx_") {
             continue;
         }
@@ -537,9 +578,10 @@ fn process_card_pck(
     for (wem_id, sound_id) in &wem_to_sound {
         if let Some(action_id) = sound_to_action.get(sound_id)
             && let Some(event_id) = action_to_event.get(action_id)
-                && let Some(name) = event_table.get(event_id) {
-                    wem_to_name.insert(*wem_id, name.clone());
-                }
+            && let Some(name) = event_table.get(event_id)
+        {
+            wem_to_name.insert(*wem_id, name.clone());
+        }
     }
 
     // 反转：event_name → [wem_id]
@@ -663,13 +705,13 @@ fn classify_play_suffix(suffix: &str) -> String {
     if let Some(rest) = suffix.strip_prefix("9_") {
         return format!("play_pair_{rest}");
     }
+    if let Some(rest) = suffix.strip_prefix("11_") {
+        return format!("play_pair_{rest}");
+    }
     if let Some(rest) = suffix.strip_prefix("7_") {
         return format!("play_cross_{rest}");
     }
     if let Some(rest) = suffix.strip_prefix("8_") {
-        return format!("play_token_{rest}");
-    }
-    if let Some(rest) = suffix.strip_prefix("11_") {
         return format!("play_token_{rest}");
     }
     if let Some(rest) = suffix.strip_prefix("1_skill_") {
@@ -755,5 +797,55 @@ fn make_slot_label(slot: &str, base_labels: &BTreeMap<&'static str, SlotLabel>) 
         jpn: slot.to_string(),
         kor: slot.to_string(),
         cht: slot.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_voice_map_reads_current_card_resource_columns() -> anyhow::Result<()> {
+        let mut row = vec![json!(""); 53];
+        row[38] = json!("dx_10001110");
+        row[39] = json!(
+            "Play_dx_10001110_1,Play_dx_10001110_1_enh,Play_dx_10001110_1_ehn7,Play_dx_10001110_11_10001120_10001130"
+        );
+        row[41] = json!("Play_dx_10001110_2");
+        row[42] = json!("Play_dx_10001110_2_evo");
+        row[43] = json!("Play_dx_10001110_3,Play_dx_10001110_3_sp");
+        row[45] = json!("Play_dx_10001110_4");
+        row[46] = json!("Play_dx_10001110_4_evo");
+        row[47] = json!("Play_dx_10001110_4_token");
+        row[48] = json!("Play_dx_10001110_5");
+        row[49] = json!("Play_dx_10001110_5_evo");
+        row[50] = json!("Play_dx_10001110_10");
+
+        let temp_dir = tempfile::tempdir()?;
+        let table_path = temp_dir.path().join("CardResourceMaster.json");
+        std::fs::write(&table_path, serde_json::to_vec(&vec![row])?)?;
+
+        let voice_map = build_voice_map(&table_path)?;
+        let slots = voice_map
+            .get("10001110")
+            .context("voice map should contain sound prefix from column 38")?;
+
+        assert!(slots.contains_key("play"));
+        assert!(slots.contains_key("play_enhance"));
+        assert!(slots.contains_key("play_enhance_7"));
+        assert!(slots.contains_key("play_pair_10001120_10001130"));
+        assert!(slots.contains_key("attack"));
+        assert!(slots.contains_key("evo_attack"));
+        assert!(slots.contains_key("destroy"));
+        assert!(slots.contains_key("destroy_token"));
+        assert!(slots.contains_key("evolve"));
+        assert!(slots.contains_key("evo_destroy"));
+        assert!(slots.contains_key("skill"));
+        assert!(slots.contains_key("evo_skill"));
+        assert!(slots.contains_key("act"));
+        assert!(slots.contains_key("super_evolve"));
+
+        Ok(())
     }
 }

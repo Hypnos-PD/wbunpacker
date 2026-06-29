@@ -189,6 +189,7 @@ dependencies = [
  "indicatif",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "walkdir",
 ]
@@ -1217,6 +1218,7 @@ dependencies = [
  "rmpv",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
 ]
 
