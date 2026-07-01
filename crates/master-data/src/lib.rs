@@ -335,8 +335,8 @@ pub fn generate_cards_full(master_data_dir: &Path, output_path: &Path) -> anyhow
         let evolves_to = cm[7].as_i64().unwrap_or(0);
         let resource_id = cm[9].as_i64().unwrap_or(0);
 
-        // BaseCardMaster 数据（只有基础形态有）
-        let bcm = bcm_by_id.get(&card_id);
+        // BaseCardMaster 数据（变体回退到 base_card_id）
+        let bcm = bcm_by_id.get(&card_id).or_else(|| bcm_by_id.get(&base_card_id));
         let cost = bcm.and_then(|r| serde_json::to_value(&r[4]).ok());
         let rarity = bcm.and_then(|r| serde_json::to_value(&r[8]).ok());
         let type_flags = bcm.and_then(|r| serde_json::to_value(&r[1]).ok());
