@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub mod card_voices;
+pub mod leader_skin_voices;
 pub mod wwise;
 
 /// 从 pck 路径中检测语言代码。

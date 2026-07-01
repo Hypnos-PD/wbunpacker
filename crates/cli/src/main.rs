@@ -150,6 +150,8 @@ enum MasterCmd {
 enum AudioCmd {
     /// 提取卡牌语音: 按语言/卡牌/槽位分发 → MP3 + voice_index.json
     Card,
+    /// 提取 LeaderSkin detail 语音: Play_dx_dtl_{id}_{animation}_{option}
+    LeaderSkin,
 }
 #[derive(Subcommand)]
 enum TextureCmd {
@@ -1608,6 +1610,37 @@ async fn main() -> anyhow::Result<()> {
                     println!(
                         "\n卡牌语音提取完成: {} 张卡, {} 个 MP3 (跳过: {})",
                         stats.cards_processed, stats.files_output, stats.files_skipped
+                    );
+                }
+                Some(AudioCmd::LeaderSkin) => {
+                    let first_variant = "Chs";
+                    let mapping_path = data_dir
+                        .join("variants")
+                        .join(first_variant)
+                        .join("raw-assets")
+                        .join("sound/WwiseIdMapping.bytes");
+                    let mapping_data = std::fs::read(&mapping_path)
+                        .with_context(|| format!("请先运行 wbu asset batch -v {first_variant}"))?;
+                    let pck_root = data_dir
+                        .join("variants")
+                        .join(first_variant)
+                        .join("raw-assets")
+                        .join("sound");
+                    let output_dir = data_dir.join("exports").join("leader-skin-voices");
+                    let audio_wav_dir = data_dir.join("exports").join("audio");
+                    println!("pck 根目录: {}", pck_root.display());
+                    println!("输出目录: {}", output_dir.display());
+                    let stats = audio::leader_skin_voices::extract_leader_skin_voices(
+                        &pck_root,
+                        &output_dir,
+                        &audio_wav_dir,
+                        &mapping_data,
+                        vgmstream_path,
+                        &cfg.ffmpeg_path,
+                    )?;
+                    println!(
+                        "\nLeaderSkin 语音提取完成: {} 个 pck, {} 个 MP3 (跳过: {}, 失败: {})",
+                        stats.pck_files, stats.files_output, stats.files_skipped, stats.failed
                     );
                 }
                 None => {
