@@ -67,6 +67,15 @@ enum Command {
         #[arg(long)]
         asset_studio: Option<String>,
     },
+    /// 提取 LeaderSkin Spine 动画 → Web 可用格式（skel/atlas/png + config.json）
+    LeaderSkin {
+        /// 语言变体: Chs/Eng/Jpn/Kor/Cht
+        #[arg(short, long, default_value = "Chs")]
+        variant: String,
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+    },
     /// 渲染完整卡牌图（MVP: 卡图 + Card2D 边框 + 名称/cost/攻血）
     Render {
         #[command(subcommand)]
@@ -1760,6 +1769,22 @@ async fn main() -> anyhow::Result<()> {
             println!(
                 "HomeIllustration 提取完成: {} | 跳过: {} | 失败: {}",
                 stats.processed, stats.skipped, stats.failed
+            );
+        }
+        Command::LeaderSkin {
+            variant,
+            asset_studio,
+        } => {
+            let cfg = config::load()?;
+            let as_path = match &asset_studio {
+                Some(p) => std::path::PathBuf::from(p),
+                None => std::path::PathBuf::from(&cfg.asset_studio_path),
+            };
+            let data_dir = std::path::Path::new(&cfg.data_dir);
+            let stats = texture::leader_skin::process_leader_skins(data_dir, &as_path, &variant)?;
+            println!(
+                "LeaderSkin 提取完成: {} | 跳过: {} | 元数据更新: {} | 失败: {}",
+                stats.processed, stats.skipped, stats.metadata_updated, stats.failed
             );
         }
         Command::Render { sub } => match sub {

@@ -41,6 +41,7 @@ use std::process::Command;
 use tracing::debug;
 
 pub mod home_illust;
+pub mod leader_skin;
 
 // ============================================================================
 // 常量
