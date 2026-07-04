@@ -432,6 +432,7 @@ pub fn extract_card_voices(
     mapping_data: &[u8],
     vgmstream_path: &Path,
     ffmpeg_path: &str,
+    force: bool,
 ) -> anyhow::Result<CardVoiceStats> {
     let voice_map = build_voice_map(card_resource_path)?;
     let event_table = crate::wwise::decrypt_wwise_event_table(mapping_data)
@@ -480,6 +481,7 @@ pub fn extract_card_voices(
                 vgmstream_path,
                 ffmpeg_path,
                 &event_table,
+                force,
             ) {
                 Ok((card_slots, skipped)) => {
                     stats.files_skipped += skipped;
@@ -547,6 +549,7 @@ fn process_card_pck(
     vgmstream_path: &Path,
     ffmpeg_path: &str,
     event_table: &BTreeMap<u32, String>,
+    force: bool,
 ) -> anyhow::Result<(BTreeMap<String, String>, usize)> {
     use crate::wwise::{collect_hirc_mappings, extract_banks_from_pck};
 
@@ -616,7 +619,7 @@ fn process_card_pck(
         let mp3_path = card_out.join(format!("{}.mp3", slot));
 
         // 跳过已存在（增量）
-        if mp3_path.exists() {
+        if !force && mp3_path.exists() {
             skipped += 1;
             result.insert(slot.clone(), format!("{}/{}/{}.mp3", lang, prefix, slot));
             continue;
@@ -837,14 +840,23 @@ mod tests {
         assert!(slots.contains_key("play_pair_10001120_10001130"));
         assert!(slots.contains_key("attack"));
         assert!(slots.contains_key("evo_attack"));
-        assert!(slots.contains_key("destroy"));
+        assert_eq!(
+            slots.get("destroy"),
+            Some(&vec!["Play_dx_10001110_4".to_string()])
+        );
         assert!(slots.contains_key("destroy_token"));
-        assert!(slots.contains_key("evolve"));
+        assert_eq!(
+            slots.get("evolve"),
+            Some(&vec!["Play_dx_10001110_3".to_string()])
+        );
         assert!(slots.contains_key("evo_destroy"));
         assert!(slots.contains_key("skill"));
         assert!(slots.contains_key("evo_skill"));
         assert!(slots.contains_key("act"));
-        assert!(slots.contains_key("super_evolve"));
+        assert_eq!(
+            slots.get("super_evolve"),
+            Some(&vec!["Play_dx_10001110_3_sp".to_string()])
+        );
 
         Ok(())
     }

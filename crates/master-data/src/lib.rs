@@ -336,7 +336,9 @@ pub fn generate_cards_full(master_data_dir: &Path, output_path: &Path) -> anyhow
         let resource_id = cm[9].as_i64().unwrap_or(0);
 
         // BaseCardMaster 数据（变体回退到 base_card_id）
-        let bcm = bcm_by_id.get(&card_id).or_else(|| bcm_by_id.get(&base_card_id));
+        let bcm = bcm_by_id
+            .get(&card_id)
+            .or_else(|| bcm_by_id.get(&base_card_id));
         let cost = bcm.and_then(|r| serde_json::to_value(&r[4]).ok());
         let rarity = bcm.and_then(|r| serde_json::to_value(&r[8]).ok());
         let type_flags = bcm.and_then(|r| serde_json::to_value(&r[1]).ok());
@@ -415,6 +417,55 @@ fn read_json_table(dir: &Path, filename: &str) -> anyhow::Result<Vec<Vec<serde_j
     let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&content)
         .with_context(|| format!("JSON 解析失败: {}", path.display()))?;
     Ok(rows)
+}
+
+fn load_master_text_labels(
+    master_data_dir: &Path,
+) -> anyhow::Result<std::collections::HashMap<String, std::collections::HashMap<String, String>>> {
+    let langs = ["Chs", "Eng", "Jpn", "Kor", "Cht"];
+    let mut labels = std::collections::HashMap::new();
+    for lang in langs {
+        let rows = read_json_table(&master_data_dir.join(lang), "MasterTextLabel.json")?;
+        let mut lang_labels = std::collections::HashMap::new();
+        for row in &rows {
+            let key = row.first().and_then(|v| v.as_str()).unwrap_or("");
+            let value = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            if !key.is_empty() {
+                lang_labels.insert(key.to_string(), value.to_string());
+            }
+        }
+        labels.insert(lang.to_string(), lang_labels);
+    }
+    Ok(labels)
+}
+
+fn localized_text(
+    labels: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    lang: &str,
+    key: &str,
+) -> String {
+    labels
+        .get(lang)
+        .and_then(|lang_labels| lang_labels.get(key))
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn cards_full_path(output_path: &Path) -> PathBuf {
+    output_path
+        .parent()
+        .map(|p| p.join("cards_full.json"))
+        .unwrap_or_else(|| PathBuf::from("cards_full.json"))
+}
+
+fn load_cards_full(output_path: &Path) -> anyhow::Result<Vec<CardFullEntry>> {
+    let path = cards_full_path(output_path);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let cards = serde_json::from_str(&raw).unwrap_or_default();
+    Ok(cards)
 }
 
 // ---------------------------------------------------------------------------
@@ -497,49 +548,20 @@ pub fn generate_emblems_full(master_data_dir: &Path, output_path: &Path) -> anyh
         })
         .collect();
 
-    // 5 语言 MasterTextLabel
-    let langs = ["Chs", "Eng", "Jpn", "Kor", "Cht"];
-    let mut mtl_all: HashMap<String, HashMap<String, String>> = HashMap::new();
-    for lang in &langs {
-        let mtl: Vec<Vec<serde_json::Value>> =
-            read_json_table(&master_data_dir.join(lang), "MasterTextLabel.json")?;
-        let mut map = HashMap::new();
-        for r in &mtl {
-            let key = r[0].as_str().unwrap_or("").to_string();
-            let val = r[1].as_str().unwrap_or("").to_string();
-            if !key.is_empty() {
-                map.insert(key, val);
-            }
-        }
-        mtl_all.insert(lang.to_string(), map);
-    }
+    let mtl_all = load_master_text_labels(master_data_dir)?;
 
     // 获取多语言 category 文本
     let get_cat_text = |lang: &str, cat_id: i64| -> String {
         let text_key = cat_key_map.get(&cat_id).cloned().unwrap_or_default();
-        mtl_all
-            .get(lang)
-            .and_then(|m| m.get(&text_key))
-            .cloned()
-            .unwrap_or_default()
+        localized_text(&mtl_all, lang, &text_key)
     };
 
     // cards_full.json 索引: card_style_id → card entry
-    let cards_path = output_path
-        .parent()
-        .map(|p| p.join("cards_full.json"))
-        .unwrap_or_else(|| PathBuf::from("cards_full.json"));
-    let card_index: HashMap<i64, CardFullEntry> = if cards_path.exists() {
-        let raw = std::fs::read_to_string(&cards_path)?;
-        let cards: Vec<CardFullEntry> = serde_json::from_str(&raw).unwrap_or_default();
-        cards
-            .into_iter()
-            .filter(|c| !c.is_evolution)
-            .map(|c| (c.card_style_id, c))
-            .collect()
-    } else {
-        HashMap::new()
-    };
+    let card_index: HashMap<i64, CardFullEntry> = load_cards_full(output_path)?
+        .into_iter()
+        .filter(|c| !c.is_evolution)
+        .map(|c| (c.card_style_id, c))
+        .collect();
 
     // 构建条目
     let mut entries: Vec<EmblemFullEntry> = Vec::new();
@@ -625,6 +647,209 @@ struct EmblemFullEntry {
     card_name_kor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     card_name_cht: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// crests_full.json / faiths_full.json 生成
+// ---------------------------------------------------------------------------
+
+/// 从 cards_full.json 生成战斗纹章索引。
+///
+/// 静态纹章图标来自 `Card/IconCrest/CRT_{card_style_id}`，文本来自卡牌效果描述。
+pub fn generate_crests_full(master_data_dir: &Path, output_path: &Path) -> anyhow::Result<usize> {
+    let labels = load_master_text_labels(master_data_dir)?;
+    let cards = load_cards_full(output_path)?;
+    let mut entries = Vec::new();
+
+    for card in cards.into_iter().filter(|c| !c.is_evolution) {
+        let skill_desc_key = card.text_keys.skill_desc;
+        let skill_desc_chs = localized_text(&labels, "Chs", &skill_desc_key);
+        let skill_desc_eng = localized_text(&labels, "Eng", &skill_desc_key);
+        if !skill_desc_chs.contains("纹章") && !skill_desc_eng.contains("Crest") {
+            continue;
+        }
+
+        entries.push(CrestFullEntry {
+            crest_id: card.card_style_id,
+            resource_name: format!("CRT_{}", card.card_style_id),
+            image_path: format!("crests/{}.png", card.card_style_id),
+            card_id: card.card_id,
+            card_style_id: card.card_style_id,
+            card_name_chs: card.name_chs,
+            card_name_eng: card.name_eng,
+            card_name_jpn: card.name_jpn,
+            card_name_kor: card.name_kor,
+            card_name_cht: card.name_cht,
+            skill_desc_key: skill_desc_key.clone(),
+            skill_desc_chs,
+            skill_desc_eng,
+            skill_desc_jpn: localized_text(&labels, "Jpn", &skill_desc_key),
+            skill_desc_kor: localized_text(&labels, "Kor", &skill_desc_key),
+            skill_desc_cht: localized_text(&labels, "Cht", &skill_desc_key),
+            skills: card.skills,
+        });
+    }
+
+    write_json_entries(output_path, &entries)?;
+    Ok(entries.len())
+}
+
+/// 从 FaithAcquiredAbilityText + cards_full.json 生成战斗信仰索引。
+pub fn generate_faiths_full(master_data_dir: &Path, output_path: &Path) -> anyhow::Result<usize> {
+    let labels = load_master_text_labels(master_data_dir)?;
+    let rows = read_json_table(
+        &master_data_dir.join("Chs"),
+        "FaithAcquiredAbilityText.json",
+    )?;
+    let card_index: std::collections::HashMap<i64, CardFullEntry> = load_cards_full(output_path)?
+        .into_iter()
+        .filter(|c| !c.is_evolution)
+        .map(|c| (c.card_id, c))
+        .collect();
+    let mut entries = Vec::new();
+
+    for row in &rows {
+        let faith_id = row.first().and_then(|v| v.as_i64()).unwrap_or(0);
+        if faith_id == 0 {
+            continue;
+        }
+        let Some(specs) = row.get(1).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for spec in specs.iter().filter_map(|v| v.as_str()) {
+            let Some(mapping) = parse_faith_mapping(spec) else {
+                continue;
+            };
+            let Some(card) = card_index.get(&mapping.card_id) else {
+                continue;
+            };
+            entries.push(FaithFullEntry {
+                faith_id,
+                resource_name: format!("CRT_{}", card.card_style_id),
+                image_path: format!("crests/{}.png", card.card_style_id),
+                appear_effect_prefix: format!("stt_faith_appear_{}", faith_id),
+                ability_index: mapping.ability_index,
+                ability_text_key: mapping.ability_text_key.clone(),
+                ability_text_chs: localized_text(&labels, "Chs", &mapping.ability_text_key),
+                ability_text_eng: localized_text(&labels, "Eng", &mapping.ability_text_key),
+                ability_text_jpn: localized_text(&labels, "Jpn", &mapping.ability_text_key),
+                ability_text_kor: localized_text(&labels, "Kor", &mapping.ability_text_key),
+                ability_text_cht: localized_text(&labels, "Cht", &mapping.ability_text_key),
+                card_id: card.card_id,
+                card_style_id: card.card_style_id,
+                card_name_chs: card.name_chs.clone(),
+                card_name_eng: card.name_eng.clone(),
+                card_name_jpn: card.name_jpn.clone(),
+                card_name_kor: card.name_kor.clone(),
+                card_name_cht: card.name_cht.clone(),
+                faith_name_key: card.text_keys.name.clone(),
+                faith_name_chs: localized_text(&labels, "Chs", &card.text_keys.name),
+                faith_name_eng: localized_text(&labels, "Eng", &card.text_keys.name),
+                faith_name_jpn: localized_text(&labels, "Jpn", &card.text_keys.name),
+                faith_name_kor: localized_text(&labels, "Kor", &card.text_keys.name),
+                faith_name_cht: localized_text(&labels, "Cht", &card.text_keys.name),
+                skill_desc_key: card.text_keys.skill_desc.clone(),
+                skill_desc_chs: localized_text(&labels, "Chs", &card.text_keys.skill_desc),
+                skill_desc_eng: localized_text(&labels, "Eng", &card.text_keys.skill_desc),
+                skill_desc_jpn: localized_text(&labels, "Jpn", &card.text_keys.skill_desc),
+                skill_desc_kor: localized_text(&labels, "Kor", &card.text_keys.skill_desc),
+                skill_desc_cht: localized_text(&labels, "Cht", &card.text_keys.skill_desc),
+                skills: card.skills.clone(),
+            });
+        }
+    }
+
+    write_json_entries(output_path, &entries)?;
+    Ok(entries.len())
+}
+
+fn write_json_entries<T: serde::Serialize>(
+    output_path: &Path,
+    entries: &[T],
+) -> anyhow::Result<()> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(entries)?;
+    std::fs::write(output_path, json)?;
+    Ok(())
+}
+
+struct FaithMapping {
+    card_id: i64,
+    ability_text_key: String,
+    ability_index: i64,
+}
+
+fn parse_faith_mapping(spec: &str) -> Option<FaithMapping> {
+    let mut parts = spec.split(':');
+    let card_id = parts.next()?.parse().ok()?;
+    let ability_text_key = parts.next()?.to_string();
+    let ability_index = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(FaithMapping {
+        card_id,
+        ability_text_key,
+        ability_index,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct CrestFullEntry {
+    crest_id: i64,
+    resource_name: String,
+    image_path: String,
+    card_id: i64,
+    card_style_id: i64,
+    card_name_chs: String,
+    card_name_eng: String,
+    card_name_jpn: String,
+    card_name_kor: String,
+    card_name_cht: String,
+    skill_desc_key: String,
+    skill_desc_chs: String,
+    skill_desc_eng: String,
+    skill_desc_jpn: String,
+    skill_desc_kor: String,
+    skill_desc_cht: String,
+    skills: Vec<SkillEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct FaithFullEntry {
+    faith_id: i64,
+    resource_name: String,
+    image_path: String,
+    appear_effect_prefix: String,
+    ability_index: i64,
+    ability_text_key: String,
+    ability_text_chs: String,
+    ability_text_eng: String,
+    ability_text_jpn: String,
+    ability_text_kor: String,
+    ability_text_cht: String,
+    card_id: i64,
+    card_style_id: i64,
+    card_name_chs: String,
+    card_name_eng: String,
+    card_name_jpn: String,
+    card_name_kor: String,
+    card_name_cht: String,
+    faith_name_key: String,
+    faith_name_chs: String,
+    faith_name_eng: String,
+    faith_name_jpn: String,
+    faith_name_kor: String,
+    faith_name_cht: String,
+    skill_desc_key: String,
+    skill_desc_chs: String,
+    skill_desc_eng: String,
+    skill_desc_jpn: String,
+    skill_desc_kor: String,
+    skill_desc_cht: String,
+    skills: Vec<SkillEntry>,
 }
 // ---------------------------------------------------------------------------
 // stamps_full.json 生成
@@ -916,6 +1141,147 @@ mod tests {
         assert_eq!(output[0]["card_id"], json!(10001110));
         assert_eq!(output[0]["card_name_chs"], json!("不屈的剑斗士"));
         assert_eq!(output[0]["card_name_eng"], json!("Indomitable Fighter"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn generate_faiths_full_resolves_card_and_ability_text() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let master_dir = temp_dir.path().join("master-data");
+        let output_dir = temp_dir.path().join("analysis");
+        for lang in ["Chs", "Eng", "Jpn", "Kor", "Cht"] {
+            std::fs::create_dir_all(master_dir.join(lang))?;
+        }
+
+        std::fs::write(
+            master_dir.join("Chs").join("FaithAcquiredAbilityText.json"),
+            serde_json::to_vec(&vec![json!([10354112, ["10354110:FAA_10354110:1"]])])?,
+        )?;
+        for (lang, faith_name, ability, desc) in [
+            (
+                "Chs",
+                "信仰：沙姆纳哈",
+                "自己选择的模式数+1",
+                "信仰值起始为0。",
+            ),
+            (
+                "Eng",
+                "Faith: Sham-Nacha",
+                "Increase mode choices by 1.",
+                "Faith Value starts at 0.",
+            ),
+            ("Jpn", "信仰", "能力", "説明"),
+            ("Kor", "신앙", "능력", "설명"),
+            ("Cht", "信仰", "能力", "說明"),
+        ] {
+            std::fs::write(
+                master_dir.join(lang).join("MasterTextLabel.json"),
+                serde_json::to_vec(&vec![
+                    json!(["CN_10354110", "沙姆纳哈"]),
+                    json!(["CN_10354112", faith_name]),
+                    json!(["FAA_10354110", ability]),
+                    json!(["SD_10354112_01", desc]),
+                ])?,
+            )?;
+        }
+        std::fs::create_dir_all(&output_dir)?;
+        std::fs::write(
+            output_dir.join("cards_full.json"),
+            serde_json::to_vec(&vec![json!({
+                "card_id": 10354110,
+                "base_card_id": 10354110,
+                "card_style_id": 103541100,
+                "class": 7,
+                "cost": 2,
+                "rarity": 4,
+                "type_flags": 1,
+                "is_evolution": false,
+                "evolves_to": 10354111,
+                "skills": [{"skill_id": 103541101, "type": 1, "subtype": 0}],
+                "resource_id": 103541100,
+                "name_chs": "沙姆纳哈",
+                "name_eng": "Sham-Nacha",
+                "name_jpn": "シャムナハ",
+                "name_kor": "샴나하",
+                "name_cht": "沙姆納哈",
+                "text_keys": {
+                    "name": "CN_10354112",
+                    "skill_desc": "SD_10354112_01",
+                    "flavor_1": "FT_10354112_01",
+                    "flavor_2": "FT_10354112_02",
+                    "cv": "CV_10354112"
+                }
+            })])?,
+        )?;
+
+        let output_path = output_dir.join("faiths_full.json");
+        generate_faiths_full(&master_dir, &output_path)?;
+        let output: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(output_path)?)?;
+
+        assert_eq!(output[0]["faith_id"], json!(10354112));
+        assert_eq!(output[0]["card_id"], json!(10354110));
+        assert_eq!(output[0]["resource_name"], json!("CRT_103541100"));
+        assert_eq!(output[0]["image_path"], json!("crests/103541100.png"));
+        assert_eq!(
+            output[0]["ability_text_eng"],
+            json!("Increase mode choices by 1.")
+        );
+        assert_eq!(output[0]["skill_desc_chs"], json!("信仰值起始为0。"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn generate_crests_full_filters_cards_with_crest_text() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let master_dir = temp_dir.path().join("master-data");
+        let output_dir = temp_dir.path().join("analysis");
+        for lang in ["Chs", "Eng", "Jpn", "Kor", "Cht"] {
+            std::fs::create_dir_all(master_dir.join(lang))?;
+            std::fs::write(
+                master_dir.join(lang).join("MasterTextLabel.json"),
+                serde_json::to_vec(&vec![json!(["SD_10114110_01", "Gain Crest: Aria."])])?,
+            )?;
+        }
+        std::fs::create_dir_all(&output_dir)?;
+        std::fs::write(
+            output_dir.join("cards_full.json"),
+            serde_json::to_vec(&vec![json!({
+                "card_id": 10114110,
+                "base_card_id": 10114110,
+                "card_style_id": 101141100,
+                "class": 1,
+                "cost": 2,
+                "rarity": 4,
+                "type_flags": 1,
+                "is_evolution": false,
+                "evolves_to": 10114111,
+                "skills": [],
+                "resource_id": 101141100,
+                "name_chs": "阿丽雅",
+                "name_eng": "Aria",
+                "name_jpn": "アリア",
+                "name_kor": "아리아",
+                "name_cht": "阿麗雅",
+                "text_keys": {
+                    "name": "CN_10114110",
+                    "skill_desc": "SD_10114110_01",
+                    "flavor_1": "FT_10114110_01",
+                    "flavor_2": "FT_10114110_02",
+                    "cv": "CV_10114110"
+                }
+            })])?,
+        )?;
+
+        let output_path = output_dir.join("crests_full.json");
+        generate_crests_full(&master_dir, &output_path)?;
+        let output: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(output_path)?)?;
+
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["crest_id"], json!(101141100));
+        assert_eq!(output[0]["resource_name"], json!("CRT_101141100"));
+        assert_eq!(output[0]["image_path"], json!("crests/101141100.png"));
 
         Ok(())
     }

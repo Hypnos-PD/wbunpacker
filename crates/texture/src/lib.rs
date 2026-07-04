@@ -59,6 +59,9 @@ const CARD_FRAME_SOURCE_DIR: &str = "UI/Card2D";
 /// 卡牌职业图标资源目录。
 const CARD_CLASS_ICON_SOURCE_FILE: &str = "Atlas/Card2D.ab";
 
+/// 战斗纹章/信仰图标资源目录。
+const CREST_ICON_SOURCE_DIR: &str = "Card/IconCrest";
+
 /// Emblem 徽章资源目录。
 const EMBLEM_SOURCE_DIR: &str = "UI/Emblem";
 /// Stamp 贴图资源目录。
@@ -143,6 +146,11 @@ pub fn process_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::
 /// 提取 Card2D 卡牌边框 PNG。
 pub fn process_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
     extract_card_frames(data_dir, asset_studio_path)
+}
+
+/// 提取战斗纹章/信仰图标 PNG。
+pub fn process_crests(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
+    extract_crests(data_dir, asset_studio_path)
 }
 
 /// 提取 Home Illustration 静态展示图 PNG。
@@ -779,11 +787,12 @@ fn categorize(raw_dir: &Path, output_dir: &Path) -> anyhow::Result<CategorizeRes
 
         // 递归查找 PNG 并移动
         if let Ok(pngs) = find_pngs(&entry.path())
-            && let Some(png_path) = pngs.first() {
-                pb.set_message(resource_id.to_string());
-                std::fs::rename(png_path, &dest)?;
-                result.png_count += 1;
-            }
+            && let Some(png_path) = pngs.first()
+        {
+            pb.set_message(resource_id.to_string());
+            std::fs::rename(png_path, &dest)?;
+            result.png_count += 1;
+        }
         pb.inc(1);
     }
 
@@ -1072,10 +1081,11 @@ fn extract_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Resu
         // AssetStudio 输出: .temp_output/{bundle_name}.ab_export/CAB-{hash}/{texture_name}.png
         let export_dir = temp_output.join(format!("{}_export", name));
         if let Ok(pngs) = find_pngs(&export_dir)
-            && let Some(png_path) = pngs.first() {
-                std::fs::rename(png_path, &dest)?;
-                debug!("pack-icons 图标更新: {} → {}", id, dest.display());
-            }
+            && let Some(png_path) = pngs.first()
+        {
+            std::fs::rename(png_path, &dest)?;
+            debug!("pack-icons 图标更新: {} → {}", id, dest.display());
+        }
     }
 
     // 清理临时目录
@@ -1165,10 +1175,11 @@ fn extract_card_frames(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Res
         let id = file_name.strip_suffix(".ab").unwrap_or(&file_name);
         let export_dir = temp_output.join(format!("{}_export", file_name));
         if let Ok(pngs) = find_pngs(&export_dir)
-            && let Some(png_path) = pngs.first() {
-                std::fs::rename(png_path, output_dir.join(format!("{id}.png")))?;
-                exported += 1;
-            }
+            && let Some(png_path) = pngs.first()
+        {
+            std::fs::rename(png_path, output_dir.join(format!("{id}.png")))?;
+            exported += 1;
+        }
     }
 
     let _ = std::fs::remove_dir_all(&temp_input);
@@ -1456,11 +1467,12 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
         let dest = output_dir.join(format!("{}.png", id));
         let export_dir = temp_output.join(format!("{}_export", name));
         if let Ok(pngs) = find_pngs(&export_dir)
-            && let Some(png_path) = pngs.first() {
-                std::fs::rename(png_path, &dest)?;
-                exported += 1;
-                debug!("徽章更新: {} -> {}", id, dest.display());
-            }
+            && let Some(png_path) = pngs.first()
+        {
+            std::fs::rename(png_path, &dest)?;
+            exported += 1;
+            debug!("徽章更新: {} -> {}", id, dest.display());
+        }
     }
 
     // 清理
@@ -1472,6 +1484,188 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
     std::fs::write(&hash_cache_path, json)?;
 
     println!("徽章提取完成: 更新 {} 个", exported);
+    Ok(())
+}
+
+// ============================================================================
+// crest / faith icon 提取
+// ============================================================================
+
+/// 从 Card/IconCrest 解密 AB 中导出 PNG。
+fn extract_crests(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
+    use sha2::Digest;
+    use std::collections::BTreeMap;
+    use std::io::Read;
+
+    let source_dir = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("decrypted")
+        .join(CREST_ICON_SOURCE_DIR);
+
+    if !source_dir.exists() {
+        anyhow::bail!(
+            "纹章/信仰图标源目录不存在: {}（请先运行 wbu asset batch -v Chs）",
+            source_dir.display()
+        );
+    }
+
+    let output_dir = data_dir.join("exports").join("crests");
+    std::fs::create_dir_all(&output_dir)?;
+
+    let hash_cache_path = output_dir.join(".hashes.json");
+    let hash_cache: BTreeMap<String, String> = if hash_cache_path.exists() {
+        let raw = std::fs::read_to_string(&hash_cache_path)?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+
+    let mut bundles: Vec<_> = std::fs::read_dir(&source_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("CRT_") && name.ends_with(".ab")
+        })
+        .collect();
+    bundles.sort_by_key(|e| e.file_name());
+
+    if bundles.is_empty() {
+        println!("Card/IconCrest 目录为空，跳过");
+        return Ok(());
+    }
+
+    let mut stale_ids: Vec<String> = Vec::new();
+    let mut current_hashes: BTreeMap<String, String> = BTreeMap::new();
+
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("CRT_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name)
+            .to_string();
+
+        let mut file = std::fs::File::open(entry.path())?;
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        current_hashes.insert(id.clone(), hash.clone());
+
+        let png_path = output_dir.join(format!("{}.png", &id));
+        if !png_path.exists() || hash_cache.get(&id) != Some(&hash) {
+            stale_ids.push(id);
+        }
+    }
+
+    if stale_ids.is_empty() {
+        println!("crests 全部为最新（{} 个），跳过", bundles.len());
+        let json = serde_json::to_string_pretty(&current_hashes)?;
+        std::fs::write(&hash_cache_path, json)?;
+        return Ok(());
+    }
+
+    println!(
+        "需要更新 {} 个纹章/信仰图标（共 {} 个，{} 个已是最新）",
+        stale_ids.len(),
+        bundles.len(),
+        bundles.len() - stale_ids.len()
+    );
+
+    let temp_input = output_dir.join(".temp_input");
+    let temp_output = output_dir.join(".temp_output");
+    if temp_input.exists() {
+        std::fs::remove_dir_all(&temp_input)?;
+    }
+    if temp_output.exists() {
+        std::fs::remove_dir_all(&temp_output)?;
+    }
+    std::fs::create_dir_all(&temp_input)?;
+    std::fs::create_dir_all(&temp_output)?;
+
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("CRT_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name);
+        if stale_ids.contains(&id.to_string()) {
+            std::fs::copy(entry.path(), temp_input.join(entry.file_name()))?;
+        }
+    }
+
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} AssetStudio 导出纹章/信仰图标中... {elapsed}")
+            .unwrap(),
+    );
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let status = Command::new(asset_studio_path)
+        .arg(&temp_input)
+        .args([
+            "-t",
+            "tex2d",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName",
+            "-o",
+            &temp_output.to_string_lossy(),
+            "--unity-version",
+            UNITY_VERSION,
+            "--log-level",
+            "warning",
+        ])
+        .status()
+        .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
+
+    spinner.finish_and_clear();
+
+    if !status.success() {
+        anyhow::bail!("AssetStudio 退出码: {:?}", status.code());
+    }
+
+    let mut exported = 0usize;
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("CRT_")
+            .unwrap_or(&name)
+            .strip_suffix(".ab")
+            .unwrap_or(&name);
+
+        if !stale_ids.contains(&id.to_string()) {
+            continue;
+        }
+
+        let dest = output_dir.join(format!("{}.png", id));
+        let export_dir = temp_output.join(format!("{}_export", name));
+        if let Ok(pngs) = find_pngs(&export_dir)
+            && let Some(png_path) = pngs.first()
+        {
+            std::fs::rename(png_path, &dest)?;
+            exported += 1;
+            debug!("纹章/信仰图标更新: {} -> {}", id, dest.display());
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_input);
+    let _ = std::fs::remove_dir_all(&temp_output);
+
+    let json = serde_json::to_string_pretty(&current_hashes)?;
+    std::fs::write(&hash_cache_path, json)?;
+
+    println!("纹章/信仰图标提取完成: 更新 {} 个", exported);
     Ok(())
 }
 // ============================================================================
@@ -1649,11 +1843,12 @@ fn extract_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> a
         let dest = output_dir.join(format!("{}.png", id));
         let export_dir = temp_output.join(format!("{}_export", name));
         if let Ok(pngs) = find_pngs(&export_dir)
-            && let Some(png_path) = pngs.first() {
-                std::fs::rename(png_path, &dest)?;
-                exported += 1;
-                debug!("贴图更新: {} -> {}", id, dest.display());
-            }
+            && let Some(png_path) = pngs.first()
+        {
+            std::fs::rename(png_path, &dest)?;
+            exported += 1;
+            debug!("贴图更新: {} -> {}", id, dest.display());
+        }
     }
 
     let _ = std::fs::remove_dir_all(&temp_input);
@@ -1786,11 +1981,12 @@ fn extract_home_illust_picts(data_dir: &Path, asset_studio_path: &Path) -> anyho
         let export_dir = temp_output.join(format!("{bundle_name}_export"));
         let dest = output_dir.join(format!("hi_{id}.png"));
         if let Ok(pngs) = find_pngs(&export_dir)
-            && let Some(png_path) = pngs.first() {
-                std::fs::rename(png_path, &dest)?;
-                exported += 1;
-                debug!("Home Illustration pict 更新: {} -> {}", id, dest.display());
-            }
+            && let Some(png_path) = pngs.first()
+        {
+            std::fs::rename(png_path, &dest)?;
+            exported += 1;
+            debug!("Home Illustration pict 更新: {} -> {}", id, dest.display());
+        }
     }
 
     let _ = std::fs::remove_dir_all(&temp_input);

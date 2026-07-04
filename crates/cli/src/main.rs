@@ -152,13 +152,21 @@ enum MasterCmd {
     Packs,
     /// 生成 emblems_full.json：合并 EmblemMaster + 多语言分类文本 + 关联卡名
     Emblems,
+    /// 生成 crests_full.json：提取战斗纹章/信仰图标与卡牌效果索引
+    Crests,
+    /// 生成 faiths_full.json：提取信仰与来源卡牌/获得能力索引
+    Faiths,
     /// 生成 stamps_full.json：合并 Stamp + StampCategory + 多语言名称
     Stamps,
 }
 #[derive(Subcommand)]
 enum AudioCmd {
     /// 提取卡牌语音: 按语言/卡牌/槽位分发 → MP3 + voice_index.json
-    Card,
+    Card {
+        /// 覆盖已存在的卡牌语音 MP3
+        #[arg(short = 'F', long)]
+        force: bool,
+    },
     /// 提取 LeaderSkin detail 语音: Play_dx_dtl_{id}_{animation}_{option}
     LeaderSkin,
 }
@@ -181,6 +189,12 @@ enum TextureCmd {
     },
     /// 提取 Card2D 卡牌边框: UI/Card2D/frame2d_*.ab -> PNG
     CardFrames {
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+    },
+    /// 提取战斗纹章/信仰图标: Card/IconCrest/CRT_*.ab -> PNG
+    Crests {
         /// AssetStudio CLI 路径（覆盖配置文件）
         #[arg(long)]
         asset_studio: Option<String>,
@@ -883,9 +897,7 @@ fn write_added_manifest_json(
     Ok(())
 }
 
-fn build_added_manifest(
-    changes: Option<&manifest::ManifestChanges>,
-) -> manifest::Manifest {
+fn build_added_manifest(changes: Option<&manifest::ManifestChanges>) -> manifest::Manifest {
     let Some(c) = changes else {
         return manifest::Manifest {
             assets: vec![],
@@ -904,9 +916,7 @@ fn build_added_manifest(
     }
 }
 
-fn build_removed_manifest(
-    changes: Option<&manifest::ManifestChanges>,
-) -> manifest::Manifest {
+fn build_removed_manifest(changes: Option<&manifest::ManifestChanges>) -> manifest::Manifest {
     let Some(c) = changes else {
         return manifest::Manifest {
             assets: vec![],
@@ -948,7 +958,10 @@ fn print_diff_summary(
     top: usize,
 ) {
     println!();
-    println!("=== Manifest Diff: {} → {} ===", ctx.old_label, ctx.new_label);
+    println!(
+        "=== Manifest Diff: {} → {} ===",
+        ctx.old_label, ctx.new_label
+    );
     if ctx.mode == "git" {
         println!("Repo: {}", ctx.repo_path);
     }
@@ -1113,15 +1126,9 @@ async fn download_diff_set(
         );
         let blobs_dir = target_dir.join("blobs");
         let variant_dir = target_dir.join("variants").join(v);
-        let stats = asset::batch_download(
-            m,
-            address,
-            base_keys,
-            concurrency,
-            &blobs_dir,
-            &variant_dir,
-        )
-        .await?;
+        let stats =
+            asset::batch_download(m, address, base_keys, concurrency, &blobs_dir, &variant_dir)
+                .await?;
         println!(
             "[{v}] {label} 完成: {} | 跳过: {} | 失败: {} | 硬链接: {} | 下载: {:.1} MB",
             stats.done,
@@ -1163,11 +1170,17 @@ fn run_asset_studio_extract(
         .status()
         .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
     if !status.success() {
-        anyhow::bail!("[{variant}] {label} AssetStudio 退出码: {:?}", status.code());
+        anyhow::bail!(
+            "[{variant}] {label} AssetStudio 退出码: {:?}",
+            status.code()
+        );
     }
     // Flatten: move all files from subdirectories to output_dir root
     let count = flatten_dir(output_dir, output_dir)?;
-    println!("[{variant}] {label} 提取完成: {count} 个文件 → {}", output_dir.display());
+    println!(
+        "[{variant}] {label} 提取完成: {count} 个文件 → {}",
+        output_dir.display()
+    );
     Ok(())
 }
 
@@ -1188,7 +1201,11 @@ fn flatten_dir(dir: &std::path::Path, root: &std::path::Path) -> std::io::Result
                 let mut dst = dst;
                 // Handle filename collisions: append _1, _2, etc.
                 if dst.exists() {
-                    let stem = dst.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let stem = dst
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     let ext = dst.extension().unwrap_or_default().to_string_lossy();
                     for i in 1u32.. {
                         let candidate = if ext.is_empty() {
@@ -1328,10 +1345,7 @@ async fn main() -> anyhow::Result<()> {
                                 })?;
                             let removed: std::collections::HashMap<String, manifest::Manifest> =
                                 serde_json::from_str(&removed_json).with_context(|| {
-                                    format!(
-                                        "无法解析 removed manifest: {}",
-                                        removed_path.display()
-                                    )
+                                    format!("无法解析 removed manifest: {}", removed_path.display())
                                 })?;
                             download_diff_set(
                                 &removed,
@@ -1356,7 +1370,11 @@ async fn main() -> anyhow::Result<()> {
                         for v in &variants {
                             run_asset_studio_extract(
                                 &asset_studio_path,
-                                &diff_dir.join("added").join("variants").join(v).join("decrypted"),
+                                &diff_dir
+                                    .join("added")
+                                    .join("variants")
+                                    .join(v)
+                                    .join("decrypted"),
                                 &extracted_dir.join("added"),
                                 v,
                                 "新增",
@@ -1509,6 +1527,30 @@ async fn main() -> anyhow::Result<()> {
                     let count = master_data::generate_emblems_full(&master_data_dir, &output_path)?;
                     println!("完成: {} 个徽章 => {}", count, output_path.display());
                 }
+                Some(MasterCmd::Crests) => {
+                    let master_data_dir = data_dir.join("exports").join("master-data");
+                    let output_path = data_dir
+                        .join("exports")
+                        .join("analysis")
+                        .join("crests_full.json");
+                    println!("生成 crests_full.json...");
+                    let count = master_data::generate_crests_full(&master_data_dir, &output_path)?;
+                    println!(
+                        "完成: {} 个纹章/信仰图标索引 => {}",
+                        count,
+                        output_path.display()
+                    );
+                }
+                Some(MasterCmd::Faiths) => {
+                    let master_data_dir = data_dir.join("exports").join("master-data");
+                    let output_path = data_dir
+                        .join("exports")
+                        .join("analysis")
+                        .join("faiths_full.json");
+                    println!("生成 faiths_full.json...");
+                    let count = master_data::generate_faiths_full(&master_data_dir, &output_path)?;
+                    println!("完成: {} 个信仰 => {}", count, output_path.display());
+                }
                 Some(MasterCmd::Stamps) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
                     let output_path = data_dir
@@ -1582,7 +1624,7 @@ async fn main() -> anyhow::Result<()> {
             let data_dir = std::path::Path::new(&cfg.data_dir);
             let vgmstream_path = std::path::Path::new(&cfg.vgmstream_path);
             match sub {
-                Some(AudioCmd::Card) => {
+                Some(AudioCmd::Card { force }) => {
                     let variant = "Chs";
                     let card_resource_path = data_dir
                         .join("exports")
@@ -1615,6 +1657,7 @@ async fn main() -> anyhow::Result<()> {
                         &mapping_data,
                         vgmstream_path,
                         &cfg.ffmpeg_path,
+                        force,
                     )?;
                     println!(
                         "\n卡牌语音提取完成: {} 张卡, {} 个 MP3 (跳过: {})",
@@ -1713,6 +1756,15 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_card_frames(data_dir, &as_path)?;
+            }
+            TextureCmd::Crests { asset_studio } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                texture::process_crests(data_dir, &as_path)?;
             }
             TextureCmd::HomeIllustPicts { asset_studio } => {
                 let cfg = config::load()?;
