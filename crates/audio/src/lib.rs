@@ -157,6 +157,12 @@ pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
         }
     }
 
+    // 合并 DIDX 段：部分 WEM 索引不在 AKPK header 而在 bank 的 DIDX chunk 中
+    let didx_entries = parse_didx_data(data);
+    for (k, v) in didx_entries {
+        entries.entry(k).or_insert(v);
+    }
+
     entries
 }
 
