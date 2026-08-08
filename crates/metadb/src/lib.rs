@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn test_derive() {
         let k = base64::engine::general_purpose::STANDARD.encode(b"aaaa");
-        let bk = base64::engine::general_purpose::STANDARD.encode(b"C");
+        let bk = base64::engine::general_purpose::STANDARD.encode(b"0123456789ABCDEFGHIJKLM");
         assert_eq!(derive_final_key(&k, &bk).unwrap().len(), 4);
     }
 }
