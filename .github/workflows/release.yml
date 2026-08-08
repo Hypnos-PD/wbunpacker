@@ -27,10 +27,6 @@ jobs:
             target: aarch64-apple-darwin
             ext: ""
             archive: tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            ext: ""
-            archive: tar.gz
 
     runs-on: ${{ matrix.os }}
     steps:
