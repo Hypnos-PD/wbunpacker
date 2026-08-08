@@ -200,7 +200,7 @@ fn parse_didx_data(data: &[u8]) -> HashMap<u32, u32> {
         return entries;
     }
 
-    for chunk in data[didx_start..didx_end].chunks_exact(12) {
+    for chunk in data[didx_start..didx_end].as_chunks::<12>().0 {
         let wem_id = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let rel_offset = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]) as usize;
         let size = u32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]) as usize;
