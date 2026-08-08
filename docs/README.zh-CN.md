@@ -47,9 +47,49 @@ cp config/config.example.toml config/Config.local.toml
 
 也可通过 `WBU_CONFIG` 环境变量指定自定义配置文件路径。
 
-## 编译
+## 安装
+
+### 预编译二进制
+
+从 [Releases](https://github.com/Hypnos-PD/wbunpacker/releases) 页面下载对应的压缩包（Linux/macOS 为 `.tar.gz`，Windows 为 `.zip`），解压即可使用：
 
 ```bash
+# Linux / macOS
+tar xzf wbunpacker-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+cd wbunpacker-v0.1.0-x86_64-unknown-linux-gnu
+
+# Windows (PowerShell)
+Expand-Archive wbunpacker-v0.1.0-x86_64-pc-windows-msvc.zip
+cd wbunpacker-v0.1.0-x86_64-pc-windows-msvc
+```
+
+压缩包内包含：
+
+```
+wbu                     # （Windows 下为 wbu.exe）
+config/
+  config.example.toml   # 配置文件模板
+```
+
+复制并编辑配置文件后即可运行：
+
+```bash
+cp config/config.example.toml config/Config.local.toml
+# 编辑 config/Config.local.toml，填入你的配置
+./wbu --help
+```
+
+程序默认从当前工作目录下的 `config/Config.local.toml` 读取配置，因此请在解压后的目录中运行（也可通过 `WBU_CONFIG` 环境变量指定自定义路径）。
+
+> **注意：** [环境要求](#环境要求) 中列出的外部工具（AssetStudioModCLI、vgmstream-cli、ffmpeg、libnative.dll）仍需自行安装，压缩包不包含它们。
+
+### 源码编译
+
+```bash
+git clone <repo-url>
+cd wbunpacker
+cp config/config.example.toml config/Config.local.toml
+# 编辑 config/Config.local.toml
 cargo build --release
 # 二进制文件: target/release/wbu
 ```

@@ -48,9 +48,49 @@ Fill in `config/Config.local.toml`:
 
 You can also set `WBU_CONFIG` env var to point to a custom config path.
 
-## Build
+## Install
+
+### Pre-built binaries
+
+Download the latest `wbunpacker-<version>-<target>.tar.gz` (or `.zip` for Windows) from the [Releases](https://github.com/Hypnos-PD/wbunpacker/releases) page, then extract:
 
 ```bash
+# Linux / macOS
+tar xzf wbunpacker-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+cd wbunpacker-v0.1.0-x86_64-unknown-linux-gnu
+
+# Windows (PowerShell)
+Expand-Archive wbunpacker-v0.1.0-x86_64-pc-windows-msvc.zip
+cd wbunpacker-v0.1.0-x86_64-pc-windows-msvc
+```
+
+The archive contains:
+
+```
+wbu                     # (or wbu.exe on Windows)
+config/
+  config.example.toml   # Configuration template
+```
+
+Copy and edit the config file, then run:
+
+```bash
+cp config/config.example.toml config/Config.local.toml
+# edit config/Config.local.toml with your settings
+./wbu --help
+```
+
+The binary looks for `config/Config.local.toml` in the current working directory, so run it from the extracted folder (or set the `WBU_CONFIG` environment variable to a custom path).
+
+> **Note:** The external tools listed in [Requirements](#requirements) (AssetStudioModCLI, vgmstream-cli, ffmpeg, libnative.dll) are still needed — they are not bundled.
+
+### Build from source
+
+```bash
+git clone <repo-url>
+cd wbunpacker
+cp config/config.example.toml config/Config.local.toml
+# edit config/Config.local.toml
 cargo build --release
 # binary: target/release/wbu
 ```
