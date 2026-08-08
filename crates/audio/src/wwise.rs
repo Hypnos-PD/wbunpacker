@@ -325,9 +325,10 @@ pub fn parse_bank_hirc(bank_data: &[u8]) -> BTreeMap<u32, u32> {
     let mut result = BTreeMap::new();
     for (wem_id, sound_id) in &wem_to_sound {
         if let Some(action_id) = sound_to_action.get(sound_id)
-            && let Some(event_id) = action_to_event.get(action_id) {
-                result.insert(*wem_id, *event_id);
-            }
+            && let Some(event_id) = action_to_event.get(action_id)
+        {
+            result.insert(*wem_id, *event_id);
+        }
     }
 
     result
@@ -408,9 +409,10 @@ pub fn build_global_wem_mapping(
     for (wem_id, sound_id) in &wem_to_sound {
         if let Some(action_id) = sound_to_action.get(sound_id)
             && let Some(event_id) = action_to_event.get(action_id)
-                && let Some(name) = event_table.get(event_id) {
-                    result.insert(*wem_id, name.clone());
-                }
+            && let Some(name) = event_table.get(event_id)
+        {
+            result.insert(*wem_id, name.clone());
+        }
     }
 
     tracing::info!(

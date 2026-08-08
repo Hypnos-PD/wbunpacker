@@ -32,10 +32,12 @@ pub struct AppConfig {
     pub sqlite3mc_base_key: String,
 }
 
+#[allow(dead_code)]
 fn default_data_dir() -> String {
     "data".into()
 }
 
+#[allow(dead_code)]
 fn default_ffmpeg_path() -> String {
     "ffmpeg".into()
 }

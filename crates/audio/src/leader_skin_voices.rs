@@ -206,10 +206,8 @@ fn output_voice_file(
     let tmp_wav = mp3_path.with_extension("tmp.wav");
     wem_to_wav(wem_data, &tmp_wav, vgmstream_path)?;
     let convert_result = wav_to_mp3(&tmp_wav, mp3_path, ffmpeg_path);
+    convert_result?;
     let remove_result = std::fs::remove_file(&tmp_wav);
-    if let Err(err) = convert_result {
-        return Err(err);
-    }
     if let Err(err) = remove_result {
         tracing::warn!("临时 WAV 删除失败 {}: {err}", tmp_wav.display());
     }

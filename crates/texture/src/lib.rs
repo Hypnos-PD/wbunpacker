@@ -969,7 +969,7 @@ fn extract_pack_icons(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Resu
         current_hashes.insert(id.clone(), hash.clone());
 
         // 检查: PNG 是否存在 且 哈希与缓存一致
-        let png_path = output_dir.join(format!("{}.png", &id));
+        let png_path = output_dir.join(format!("{}.png", id));
         if !png_path.exists() {
             stale_ids.push(id);
         } else if hash_cache.get(&id) != Some(&hash) {
@@ -1372,7 +1372,7 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
         let hash = format!("{:x}", hasher.finalize());
         current_hashes.insert(id.clone(), hash.clone());
 
-        let png_path = output_dir.join(format!("{}.png", &id));
+        let png_path = output_dir.join(format!("{}.png", id));
         if !png_path.exists() || hash_cache.get(&id) != Some(&hash) {
             stale_ids.push(id);
         }
@@ -1560,7 +1560,7 @@ fn extract_crests(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<(
         let hash = format!("{:x}", hasher.finalize());
         current_hashes.insert(id.clone(), hash.clone());
 
-        let png_path = output_dir.join(format!("{}.png", &id));
+        let png_path = output_dir.join(format!("{}.png", id));
         if !png_path.exists() || hash_cache.get(&id) != Some(&hash) {
             stale_ids.push(id);
         }
@@ -1750,7 +1750,7 @@ fn extract_stamps(data_dir: &Path, asset_studio_path: &Path, variant: &str) -> a
         let hash = format!("{:x}", hasher.finalize());
         current_hashes.insert(id.clone(), hash.clone());
 
-        let png_path = output_dir.join(format!("{}.png", &id));
+        let png_path = output_dir.join(format!("{}.png", id));
         if !png_path.exists() || hash_cache.get(&id) != Some(&hash) {
             stale_ids.push(id);
         }

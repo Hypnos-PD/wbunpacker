@@ -144,9 +144,10 @@ pub fn blob_path(blobs_dir: &Path, category: &str, hash: &str) -> std::path::Pat
 pub fn hardlink_or_skip(src: &Path, dst: &Path) -> std::io::Result<bool> {
     if dst.exists() {
         if let (Ok(s_meta), Ok(d_meta)) = (std::fs::metadata(src), std::fs::metadata(dst))
-            && s_meta.len() == d_meta.len() {
-                return Ok(false);
-            }
+            && s_meta.len() == d_meta.len()
+        {
+            return Ok(false);
+        }
         std::fs::remove_file(dst)?;
     }
     if let Some(parent) = dst.parent() {
@@ -336,11 +337,12 @@ pub async fn batch_download(
             // 跳过判断：size 预筛 + CRC64 精确校验
             if link_dec.exists()
                 && std::fs::metadata(&link_dec).map(|m| m.len()).unwrap_or(0) == asset_size
-                && crc64_file(&link_dec).ok() == Some(checksum) {
-                    s.fetch_add(1, Ordering::Relaxed);
-                    pb.inc(1);
-                    return;
-                }
+                && crc64_file(&link_dec).ok() == Some(checksum)
+            {
+                s.fetch_add(1, Ordering::Relaxed);
+                pb.inc(1);
+                return;
+            }
 
             let _permit = sem.acquire().await.unwrap();
             pb.set_message(name.clone());
@@ -460,11 +462,11 @@ mod tests {
     #[test]
     fn test_decrypt_basic() {
         let mut encrypted = vec![0u8; 512];
-        for i in 256..512 {
-            encrypted[i] = (i as u8) ^ 0x42;
+        for (i, byte) in encrypted.iter_mut().enumerate().take(512).skip(256) {
+            *byte = (i as u8) ^ 0x42;
         }
 
-        let base_keys_b64 = base64::engine::general_purpose::STANDARD.encode(&[0x42u8]);
+        let base_keys_b64 = base64::engine::general_purpose::STANDARD.encode([0x42u8]);
         let reader = Cursor::new(encrypted.clone());
         let mut decryptor = AssetBundleDecryptor::new(reader, &base_keys_b64, 0).unwrap();
 
@@ -472,8 +474,8 @@ mod tests {
         decryptor.decrypt_to(&mut decrypted).unwrap();
 
         assert_eq!(decrypted[0..256], encrypted[0..256]);
-        for i in 256..512 {
-            assert_eq!(decrypted[i], i as u8, "mismatch at byte {i}");
+        for (i, byte) in decrypted.iter().enumerate().take(512).skip(256) {
+            assert_eq!(*byte, i as u8, "mismatch at byte {i}");
         }
     }
 }

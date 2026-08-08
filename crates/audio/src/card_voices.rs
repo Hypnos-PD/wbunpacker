@@ -424,6 +424,7 @@ pub fn build_voice_map(
 }
 
 /// 提取所有卡牌语音。
+#[allow(clippy::too_many_arguments)]
 pub fn extract_card_voices(
     pck_root: &Path,
     output_dir: &Path,

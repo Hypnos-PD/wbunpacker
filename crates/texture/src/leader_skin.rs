@@ -105,7 +105,13 @@ pub fn process_leader_skins(
 
         if !resources_fresh {
             // Full extraction: AssetStudio + metadata
-            match extract_one(data_dir, &bundle, &output_dir, asset_studio_path, &source_hash) {
+            match extract_one(
+                data_dir,
+                &bundle,
+                &output_dir,
+                asset_studio_path,
+                &source_hash,
+            ) {
                 Ok(()) => stats.processed += 1,
                 Err(error) => {
                     stats.failed += 1;
@@ -134,7 +140,9 @@ pub fn process_leader_skins(
 fn is_leader_skin_bundle(name: &str) -> bool {
     name.strip_suffix(".ab")
         .and_then(|stem| stem.split_once('_'))
-        .is_some_and(|(kind, id)| matches!(kind, "class" | "vs") && id.chars().all(|c| c.is_ascii_digit()))
+        .is_some_and(|(kind, id)| {
+            matches!(kind, "class" | "vs") && id.chars().all(|c| c.is_ascii_digit())
+        })
 }
 
 fn extract_one(
@@ -164,12 +172,11 @@ fn extract_one(
         .context("invalid LeaderSkin bundle stem")?;
     let skel_meta = extract_skel_metadata(&exported.skel, kind)?;
     let num_id: i64 = id.parse()?;
-    let (name, names) = load_leader_skin_name(data_dir, num_id)
-        .unwrap_or_else(|| {
-            let mut map = BTreeMap::new();
-            map.insert("jpn".to_string(), stem.to_string());
-            (stem.to_string(), map)
-        });
+    let (name, names) = load_leader_skin_name(data_dir, num_id).unwrap_or_else(|| {
+        let mut map = BTreeMap::new();
+        map.insert("jpn".to_string(), stem.to_string());
+        (stem.to_string(), map)
+    });
 
     fs::create_dir_all(output_dir)?;
     fs::copy(&exported.skel, output_dir.join(format!("{stem}.skel")))?;
@@ -227,15 +234,28 @@ fn extract_skel_metadata(_path: &Path, kind: &str) -> anyhow::Result<SkelMetadat
     // Standard class animations
     let animations = vec![
         "00_idle".into(),
-        "01_damage_1".into(), "01_damage_2".into(), "01_damage_3".into(),
-        "01_damage_4".into(), "01_damage_5".into(),
-        "02_lose_1".into(), "02_lose_2".into(),
-        "03_hello".into(), "04_thanks".into(), "05_good".into(),
-        "06_sorry".into(), "07_shock".into(), "08_think".into(),
+        "01_damage_1".into(),
+        "01_damage_2".into(),
+        "01_damage_3".into(),
+        "01_damage_4".into(),
+        "01_damage_5".into(),
+        "02_lose_1".into(),
+        "02_lose_2".into(),
+        "03_hello".into(),
+        "04_thanks".into(),
+        "05_good".into(),
+        "06_sorry".into(),
+        "07_shock".into(),
+        "08_think".into(),
         "09_excite".into(),
-        "10_extra_a1".into(), "10_extra_a2".into(), "10_extra_a3".into(),
-        "10_extra_b1".into(), "10_extra_b2".into(), "10_extra_b3".into(),
-        "11_result_win".into(), "11_result_win_loop".into(),
+        "10_extra_a1".into(),
+        "10_extra_a2".into(),
+        "10_extra_a3".into(),
+        "10_extra_b1".into(),
+        "10_extra_b2".into(),
+        "10_extra_b3".into(),
+        "11_result_win".into(),
+        "11_result_win_loop".into(),
         "12_result_lose_loop".into(),
     ];
     Ok(SkelMetadata {
@@ -246,7 +266,10 @@ fn extract_skel_metadata(_path: &Path, kind: &str) -> anyhow::Result<SkelMetadat
     })
 }
 
-fn load_leader_skin_name(data_dir: &Path, num_id: i64) -> Option<(String, BTreeMap<String, String>)> {
+fn load_leader_skin_name(
+    data_dir: &Path,
+    num_id: i64,
+) -> Option<(String, BTreeMap<String, String>)> {
     let master_root = data_dir.join("exports").join("master-data");
     let ls_path = master_root.join("Chs").join("LeaderSkinMaster.json");
     let text = fs::read_to_string(ls_path).ok()?;
@@ -271,31 +294,40 @@ fn load_leader_skin_name(data_dir: &Path, num_id: i64) -> Option<(String, BTreeM
 
     // Look up localized names from MasterTextLabel if ENT key is available
     if let Some(ref key) = ent_key {
-        let lang_variants = [("Chs", "chs"), ("Cht", "cht"), ("Eng", "eng"), ("Jpn", "jpn"), ("Kor", "kor")];
+        let lang_variants = [
+            ("Chs", "chs"),
+            ("Cht", "cht"),
+            ("Eng", "eng"),
+            ("Jpn", "jpn"),
+            ("Kor", "kor"),
+        ];
         for (variant, lang_code) in lang_variants {
             let mtl_path = master_root.join(variant).join("MasterTextLabel.json");
             if let Ok(mtl_text) = fs::read_to_string(&mtl_path)
                 && let Ok(mtl_data) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&mtl_text)
+                && let Some(row) = mtl_data
+                    .iter()
+                    .find(|r| r.first().and_then(|v| v.as_str()) == Some(key.as_str()))
+                && let Some(localized) = row.get(1).and_then(|v| v.as_str())
             {
-                if let Some(row) = mtl_data.iter().find(|r| r.first().and_then(|v| v.as_str()) == Some(key.as_str()))
-                    && let Some(localized) = row.get(1).and_then(|v| v.as_str())
-                {
-                    names.insert(lang_code.to_string(), localized.to_string());
-                }
+                names.insert(lang_code.to_string(), localized.to_string());
             }
         }
     }
 
     // Ensure at least Japanese name is present
     if let Some(ref jpn) = jpn_name {
-        names.entry("jpn".to_string()).or_insert_with(|| jpn.clone());
+        names
+            .entry("jpn".to_string())
+            .or_insert_with(|| jpn.clone());
     }
 
     Some((name, names))
 }
 
 fn atlas_has_pma(path: &Path) -> anyhow::Result<bool> {
-    let text = fs::read_to_string(path).with_context(|| format!("读取 atlas 失败: {}", path.display()))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("读取 atlas 失败: {}", path.display()))?;
     Ok(text.lines().any(|line| line.trim() == "pma:true"))
 }
 
@@ -407,12 +439,11 @@ fn update_metadata(
 
     let skel_meta = extract_skel_metadata(&skel_path, kind)?;
     let num_id: i64 = id.parse()?;
-    let (name, names) = load_leader_skin_name(data_dir, num_id)
-        .unwrap_or_else(|| {
-            let mut map = BTreeMap::new();
-            map.insert("jpn".to_string(), stem.to_string());
-            (stem.to_string(), map)
-        });
+    let (name, names) = load_leader_skin_name(data_dir, num_id).unwrap_or_else(|| {
+        let mut map = BTreeMap::new();
+        map.insert("jpn".to_string(), stem.to_string());
+        (stem.to_string(), map)
+    });
 
     let config = LeaderSkinConfig {
         config_version: CONFIG_VERSION,
@@ -444,14 +475,21 @@ fn copy_atlas_with_page_name(
     src_page: Option<&Path>,
     dst_page_name: &str,
 ) -> anyhow::Result<()> {
-    let mut atlas = fs::read_to_string(src).with_context(|| format!("读取 atlas 失败: {}", src.display()))?;
+    let mut atlas =
+        fs::read_to_string(src).with_context(|| format!("读取 atlas 失败: {}", src.display()))?;
     if let Some(page) = src_page
         .and_then(|path| path.file_name())
         .and_then(|name| name.to_str())
     {
         atlas = atlas
             .lines()
-            .map(|line| if line.trim() == page { dst_page_name } else { line })
+            .map(|line| {
+                if line.trim() == page {
+                    dst_page_name
+                } else {
+                    line
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         atlas.push('\n');

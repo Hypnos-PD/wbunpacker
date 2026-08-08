@@ -17,7 +17,7 @@ fn test_parse_real_manifest() {
     // 验证数量合理
     assert!(manifest.assets.len() > 10000, "asset 表太少");
     assert!(manifest.raw_assets.len() > 100, "raw_asset 表太少");
-    assert!(manifest.config.len() > 0, "config 表不应为空");
+    assert!(!manifest.config.is_empty(), "config 表不应为空");
     assert!(manifest.load_names.len() > 100, "assetname 表太少");
 
     // 打印前几条
