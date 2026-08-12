@@ -10,7 +10,7 @@
 - **Asset** — 并发下载、XOR 解密、基于 blob 存储去重的 Unity AssetBundle 提取
 - **Master Data** — 导出 173 张 MasterMemory 数据表为 JSON；生成派生数据（卡牌、卡包、徽章等）
 - **Audio** — 从 AKPK 容器中提取 Wwise WEM，解码为 WAV（vgmstream），转码为 MP3（ffmpeg）；提取卡牌与主战者语音
-- **Texture** — 提取卡面（848×1024）、卡包图标、卡框、纹章、徽章、印章、主界面插图；叠层渲染完整卡牌图
+- **Texture** — 提取卡面（848×1024）、卡背（764×1024）、卡包图标、卡框、纹章、徽章、印章、主界面插图；叠层渲染完整卡牌图
 - **Spine 动画** — 提取主界面插图（HomeIllustration）与主战者皮肤（LeaderSkin）的 Spine 骨骼动画
 - **MetaDB** — 通过动态 DLL 加载解密客户端 `meta.db`（SQLite3MC）
 
@@ -125,6 +125,7 @@ wbu master packs                     # 生成 pack_names.json
 wbu master emblems                   # 生成 emblems_full.json
 wbu master crests                    # 生成 crests_full.json
 wbu master stamps                    # 生成 stamps_full.json
+wbu master sleeves                   # 生成 sleeves_full.json（卡背）
 ```
 
 ### 音频 (Audio)
@@ -146,6 +147,7 @@ wbu texture card-frames              # 提取 Card2D 卡框（PNG）
 wbu texture crests                   # 提取纹章图标
 wbu texture emblems                  # 提取徽章贴图
 wbu texture stamps                   # 提取印章贴图
+wbu texture sleeves                  # 提取卡背贴图（764×1024，跳过 premium）
 wbu texture home-illust-picts        # 提取主界面插图静态图
 wbu render cards                     # 批量渲染完整卡牌图
 wbu render card --id 100101          # 渲染单张卡牌
@@ -195,6 +197,9 @@ wbu render cards                      # 8. 渲染完整卡牌图
 ├── master/                             # MasterMemory 数据表（JSON）
 ├── derived/                            # 派生数据（cards_full.json 等）
 ├── textures/                           # 提取的卡面、图标、卡框
+├── sleeves/                            # 提取的卡背
+│   ├── raw/                             #   原始 (1024×1024)
+│   └── resized/                         #   缩放 (764×1024)
 ├── homeillust/                         # 主界面插图 Spine 动画
 ├── leaderskin/                         # 主战者皮肤 Spine 动画
 └── rendered/                           # 最终渲染的卡牌图

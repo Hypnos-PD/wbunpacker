@@ -158,6 +158,8 @@ enum MasterCmd {
     Faiths,
     /// 生成 stamps_full.json：合并 Stamp + StampCategory + 多语言名称
     Stamps,
+    /// 生成 sleeves_full.json：合并 Sleeve + SleeveCategotyMaster + 多语言分类名
+    Sleeves,
 }
 #[derive(Subcommand)]
 enum AudioCmd {
@@ -219,6 +221,15 @@ enum TextureCmd {
         /// 语言变体: Chs/Eng/Jpn/Kor/Cht，或 all
         #[arg(short, long, default_value = "Chs")]
         variant: String,
+    },
+    /// 提取卡背纹理: Sleeve/Materials/sleeve_*_M.ab -> PNG（跳过 is_premium:true）
+    Sleeves {
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+        /// 跳过缩放步骤（默认会缩放至 764×1024）
+        #[arg(long)]
+        no_resize: bool,
     },
 }
 #[derive(Subcommand)]
@@ -1561,6 +1572,16 @@ async fn main() -> anyhow::Result<()> {
                     let count = master_data::generate_stamps_full(&master_data_dir, &output_path)?;
                     println!("完成: {} 个贴图 => {}", count, output_path.display());
                 }
+                Some(MasterCmd::Sleeves) => {
+                    let master_data_dir = data_dir.join("exports").join("master-data");
+                    let output_path = data_dir
+                        .join("exports")
+                        .join("analysis")
+                        .join("sleeves_full.json");
+                    println!("生成 sleeves_full.json...");
+                    let count = master_data::generate_sleeves_full(&master_data_dir, &output_path)?;
+                    println!("完成: {} 个卡背 => {}", count, output_path.display());
+                }
                 Some(MasterCmd::Cards) => {
                     let master_data_dir = data_dir.join("exports").join("master-data");
                     let output_path = data_dir
@@ -1797,6 +1818,18 @@ async fn main() -> anyhow::Result<()> {
                 for v in expand_variants(&variant) {
                     texture::process_stamps(data_dir, &as_path, &v)?;
                 }
+            }
+            TextureCmd::Sleeves {
+                asset_studio,
+                no_resize,
+            } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                texture::process_sleeves(data_dir, &as_path, no_resize)?;
             }
         },
         Command::HomeIllust {

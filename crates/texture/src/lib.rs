@@ -66,6 +66,8 @@ const CREST_ICON_SOURCE_DIR: &str = "Card/IconCrest";
 const EMBLEM_SOURCE_DIR: &str = "UI/Emblem";
 /// Stamp 贴图资源目录。
 const STAMP_SOURCE_DIR: &str = "UI/Stamp";
+/// Sleeve 卡背资源目录。
+const SLEEVE_SOURCE_DIR: &str = "Sleeve/Materials";
 
 /// Home Illustration 静态展示图资源目录。
 const HOME_ILLUST_PICT_SOURCE_DIR: &str = "UI/Home";
@@ -165,6 +167,33 @@ pub fn process_home_illust_picts(data_dir: &Path, asset_studio_path: &Path) -> a
 /// 增量: 基于 SHA256 跳过已提取且未变化的。
 pub fn process_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
     extract_emblems(data_dir, asset_studio_path)
+}
+/// 提取卡背纹理: 从 Sleeve/Materials 解密 AB 中导出 PNG，跳过 is_premium:true 内容。
+///
+/// 增量: 基于 SHA256 跳过已提取且未变化的。
+/// 默认会缩放至 764×1024。
+pub fn process_sleeves(
+    data_dir: &Path,
+    asset_studio_path: &Path,
+    no_resize: bool,
+) -> anyhow::Result<()> {
+    let output_dir = data_dir.join("exports").join("sleeves").join("raw");
+    extract_sleeves(data_dir, asset_studio_path)?;
+
+    if !no_resize {
+        let resized_dir = data_dir.join("exports").join("sleeves").join("resized");
+        let input_count = count_pngs_recursive(&output_dir);
+        let existing_count = count_pngs_recursive(&resized_dir);
+        if existing_count > 0 && existing_count >= input_count {
+            println!("跳过卡背缩放（已有 {} 个，预期 {}）", existing_count, input_count);
+        } else {
+            println!("卡背缩放至 764x1024 -> {} ...", resized_dir.display());
+            let rr = resize_sleeve_textures(&output_dir, &resized_dir)?;
+            println!("   缩放: {} | 跳过: {}", rr.resized, rr.skipped);
+        }
+    }
+
+    Ok(())
 }
 /// 提取贴图纹理: 从 UI/Stamp 解密 AB 中导出 PNG。
 ///
@@ -882,6 +911,57 @@ fn resize_single_848x1024(input: &Path, output: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 将单张 PNG 缩放至 764x1024（Lanczos3）。
+fn resize_single_764x1024(input: &Path, output: &Path) -> anyhow::Result<()> {
+    let img = image::open(input).with_context(|| format!("无法打开图片: {}", input.display()))?;
+
+    if img.width() == 764 && img.height() == 1024 {
+        std::fs::copy(input, output)?;
+        return Ok(());
+    }
+
+    let resized = img.resize_exact(764, 1024, image::imageops::FilterType::Lanczos3);
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    resized.save(output)?;
+    Ok(())
+}
+
+/// 批量缩放卡背目录树中所有 PNG 到 764x1024。
+fn resize_sleeve_textures(input_dir: &Path, output_dir: &Path) -> anyhow::Result<ResizeResult> {
+    let mut result = ResizeResult::default();
+    let pngs = find_pngs(input_dir)?;
+
+    let pb = ProgressBar::new(pngs.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("{spinner} [{bar:30}] {pos}/{len} 缩放 {msg}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    for png_path in &pngs {
+        let rel = png_path.strip_prefix(input_dir).unwrap_or(png_path);
+        let out = output_dir.join(rel);
+        if out.exists() {
+            result.skipped += 1;
+        } else {
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if let Some(name) = png_path.file_stem() {
+                pb.set_message(name.to_string_lossy().to_string());
+            }
+            resize_single_764x1024(png_path, &out)?;
+            result.resized += 1;
+        }
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+    Ok(result)
+}
+
 // ============================================================================
 // pack-icons 图标提取
 // ============================================================================
@@ -1485,6 +1565,260 @@ fn extract_emblems(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<
 
     println!("徽章提取完成: 更新 {} 个", exported);
     Ok(())
+}
+
+// ============================================================================
+// sleeve 卡背提取
+// ============================================================================
+
+/// 从 Sleeve/Materials 解密 AB 中导出 PNG。
+///
+/// 流程:
+/// 1. 从 sleeves_full.json 读取 is_premium:true 的 ID 集合并跳过
+/// 2. 扫描 variants/Chs/decrypted/Sleeve/Materials/sleeve_*_M.ab
+/// 3. SHA256 增量跳过（缓存 .hashes.json）
+/// 4. AssetStudio tex2d 导出
+/// 5. 重命名为 {sleeve_id}.png → exports/sleeves/
+fn extract_sleeves(data_dir: &Path, asset_studio_path: &Path) -> anyhow::Result<()> {
+    use sha2::Digest;
+    use std::collections::{BTreeMap, HashSet};
+    use std::io::Read;
+
+    let source_dir = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("decrypted")
+        .join(SLEEVE_SOURCE_DIR);
+
+    if !source_dir.exists() {
+        anyhow::bail!(
+            "卡背源目录不存在: {}（请先运行 wbu asset batch -v Chs）",
+            source_dir.display()
+        );
+    }
+
+    let output_dir = data_dir.join("exports").join("sleeves").join("raw");
+    std::fs::create_dir_all(&output_dir)?;
+
+    // 读取 sleeves_full.json，构建 is_premium:true 的 ID 集合
+    let premium_ids: HashSet<String> = load_premium_sleeve_ids(data_dir);
+
+    // 加载哈希缓存（sleeve_id → sha256）
+    let hash_cache_path = output_dir.join(".hashes.json");
+    let hash_cache: BTreeMap<String, String> = if hash_cache_path.exists() {
+        let raw = std::fs::read_to_string(&hash_cache_path)?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+
+    // 扫描 sleeve_*_M.ab，排除 premium
+    let bundles: Vec<_> = std::fs::read_dir(&source_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("sleeve_") && name.ends_with(".ab")
+        })
+        .collect();
+
+    if bundles.is_empty() {
+        println!("Sleeve/Materials 目录为空，跳过");
+        return Ok(());
+    }
+
+    // 增量检查
+    let mut stale_ids: Vec<String> = Vec::new();
+    let mut current_hashes: BTreeMap<String, String> = BTreeMap::new();
+    let mut skipped_premium = 0usize;
+
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // sleeve_100011205_M.ab → 100011205
+        let id = name
+            .strip_prefix("sleeve_")
+            .unwrap_or(&name)
+            .strip_suffix("_M.ab")
+            .or_else(|| name.strip_suffix(".ab"))
+            .unwrap_or(&name)
+            .to_string();
+
+        // 跳过 is_premium:true 的卡背
+        if premium_ids.contains(&id) {
+            skipped_premium += 1;
+            continue;
+        }
+
+        // 计算源 bundle 的 SHA256
+        let mut file = std::fs::File::open(entry.path())?;
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        current_hashes.insert(id.clone(), hash.clone());
+
+        let png_path = output_dir.join(format!("{}.png", id));
+        if !png_path.exists() || hash_cache.get(&id) != Some(&hash) {
+            stale_ids.push(id);
+        }
+    }
+
+    let effective_count = bundles.len() - skipped_premium;
+    if skipped_premium > 0 {
+        println!("跳过 {} 个 is_premium:true 卡背", skipped_premium);
+    }
+
+    if stale_ids.is_empty() {
+        println!("卡背全部为最新（{} 个），跳过", effective_count);
+        let json = serde_json::to_string_pretty(&current_hashes)?;
+        std::fs::write(&hash_cache_path, json)?;
+        return Ok(());
+    }
+
+    println!(
+        "需要更新 {} 个卡背（共 {} 个，{} 个已是最新）",
+        stale_ids.len(),
+        effective_count,
+        effective_count - stale_ids.len()
+    );
+
+    // 临时目录
+    let temp_input = output_dir.join(".temp_input");
+    let temp_output = output_dir.join(".temp_output");
+    if temp_input.exists() {
+        std::fs::remove_dir_all(&temp_input)?;
+    }
+    if temp_output.exists() {
+        std::fs::remove_dir_all(&temp_output)?;
+    }
+    std::fs::create_dir_all(&temp_input)?;
+    std::fs::create_dir_all(&temp_output)?;
+
+    // 只复制需要更新的 bundle（跳过 premium）
+    let mut has_stale = false;
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("sleeve_")
+            .unwrap_or(&name)
+            .strip_suffix("_M.ab")
+            .or_else(|| name.strip_suffix(".ab"))
+            .unwrap_or(&name);
+        if premium_ids.contains(id) {
+            continue;
+        }
+        if stale_ids.contains(&id.to_string()) {
+            std::fs::copy(entry.path(), temp_input.join(entry.file_name()))?;
+            has_stale = true;
+        }
+    }
+
+    if !has_stale {
+        // 全部被 premium 过滤了
+        println!("所有待处理 bundle 均为 premium，跳过 AssetStudio 导出");
+        let json = serde_json::to_string_pretty(&current_hashes)?;
+        std::fs::write(&hash_cache_path, json)?;
+        return Ok(());
+    }
+
+    // AssetStudio 导出
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} AssetStudio 导出卡背中... {elapsed}").unwrap(),
+    );
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let status = Command::new(asset_studio_path)
+        .arg(&temp_input)
+        .args([
+            "-t",
+            "tex2d",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName",
+            "-o",
+            &temp_output.to_string_lossy(),
+            "--unity-version",
+            UNITY_VERSION,
+            "--log-level",
+            "warning",
+        ])
+        .status()
+        .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
+
+    spinner.finish_and_clear();
+
+    if !status.success() {
+        anyhow::bail!("AssetStudio 退出码: {:?}", status.code());
+    }
+
+    // 收集并重命名 PNG
+    let mut exported = 0usize;
+    for entry in &bundles {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let id = name
+            .strip_prefix("sleeve_")
+            .unwrap_or(&name)
+            .strip_suffix("_M.ab")
+            .or_else(|| name.strip_suffix(".ab"))
+            .unwrap_or(&name);
+
+        if premium_ids.contains(id) || !stale_ids.contains(&id.to_string()) {
+            continue;
+        }
+
+        let dest = output_dir.join(format!("{}.png", id));
+        let export_dir = temp_output.join(format!("{}_export", name));
+        if let Ok(pngs) = find_pngs(&export_dir)
+            && let Some(png_path) = pngs.first()
+        {
+            std::fs::rename(png_path, &dest)?;
+            exported += 1;
+            debug!("卡背更新: {} -> {}", id, dest.display());
+        }
+    }
+
+    // 清理
+    let _ = std::fs::remove_dir_all(&temp_input);
+    let _ = std::fs::remove_dir_all(&temp_output);
+
+    // 更新缓存
+    let json = serde_json::to_string_pretty(&current_hashes)?;
+    std::fs::write(&hash_cache_path, json)?;
+
+    println!("卡背提取完成: 更新 {} 个", exported);
+    Ok(())
+}
+
+/// 从 sleeves_full.json 读取 is_premium:true 的 sleeve_id 集合。
+fn load_premium_sleeve_ids(data_dir: &Path) -> std::collections::HashSet<String> {
+    let path = data_dir
+        .join("exports")
+        .join("analysis")
+        .join("sleeves_full.json");
+    let json = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!("未找到 sleeves_full.json（请先运行 wbu master sleeves），不进行 premium 过滤");
+            return std::collections::HashSet::new();
+        }
+    };
+    let entries: Vec<serde_json::Value> = match serde_json::from_str(&json) {
+        Ok(v) => v,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    entries
+        .iter()
+        .filter(|e| e.get("is_premium").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter_map(|e| e.get("sleeve_id").and_then(|v| v.as_i64()))
+        .map(|id| id.to_string())
+        .collect()
 }
 
 // ============================================================================

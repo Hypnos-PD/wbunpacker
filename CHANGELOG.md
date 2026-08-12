@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1] - 2026-08-12
+
+### Added
+
+- **Sleeves (卡背)** — Extract card back/sleeve textures from `Sleeve/Materials/sleeve_*_M.ab`, with `is_premium:true` filtering and resize to 764×1024 (Lanczos3). Outputs to `exports/sleeves/raw/` and `exports/sleeves/resized/`.
+- **`sleeves_full.json`** — Generate merged sleeve data from `Sleeve.json` + `SleeveCategotyMaster.json` with 5-language category names, output to `exports/analysis/sleeves_full.json`.
+- **CLI commands** — `wbu master sleeves` and `wbu texture sleeves [--no-resize]`.
+
 ## [0.1.0] - 2026-08-08
 
 ### Added

@@ -10,7 +10,7 @@ Asset extraction and unpacking tool for **Shadowverse: Worlds Beyond** — downl
 - **Asset** — Concurrent download, XOR decryption, and blob-storage deduplication of Unity AssetBundles
 - **Master Data** — Export 173 MasterMemory tables to JSON; generate derived data (cards, packs, emblems, etc.)
 - **Audio** — Extract Wwise WEM from AKPK containers, decode to WAV (vgmstream) and transcode to MP3 (ffmpeg); extract card and leader-skin voices
-- **Texture** — Extract card art (848×1024), pack icons, card frames, crests, emblems, stamps, and home-illustration pictures; render full card images from layers
+- **Texture** — Extract card art (848×1024), card backs / sleeves (764×1024), pack icons, card frames, crests, emblems, stamps, and home-illustration pictures; render full card images from layers
 - **Spine Animations** — Extract HomeIllustration and LeaderSkin Spine skeletons, atlases, and textures
 - **MetaDB** — Decrypt the client `meta.db` (SQLite3MC) via dynamic DLL loading
 
@@ -124,8 +124,8 @@ wbu master -v all                    # Export all 173 tables to JSON
 wbu master cards                     # Generate cards_full.json (merged card data)
 wbu master packs                     # Generate pack_names.json
 wbu master emblems                   # Generate emblems_full.json
-wbu master crests                    # Generate crests_full.json
 wbu master stamps                    # Generate stamps_full.json
+wbu master sleeves                   # Generate sleeves_full.json (card backs)
 ```
 
 ### Audio
@@ -147,6 +147,7 @@ wbu texture card-frames              # Extract Card2D frames (PNG)
 wbu texture crests                   # Extract crest/faith icons
 wbu texture emblems                  # Extract emblem textures
 wbu texture stamps                   # Extract stamp textures
+wbu texture sleeves                  # Extract card back / sleeve textures (764×1024)
 wbu texture home-illust-picts        # Extract home illustration static images
 wbu render cards                     # Batch render full card images
 wbu render card --id 100101          # Render a single card
@@ -196,6 +197,9 @@ wbu render cards                      # 8. Render full card images
 ├── master/                             # MasterMemory tables (JSON)
 ├── derived/                            # Generated data (cards_full.json, etc.)
 ├── textures/                           # Extracted card art, icons, frames
+├── sleeves/                            # Extracted card backs / sleeves
+│   ├── raw/                             #   Original (1024×1024)
+│   └── resized/                         #   Resized (764×1024)
 ├── homeillust/                         # HomeIllustration Spine animations
 ├── leaderskin/                         # LeaderSkin Spine animations
 └── rendered/                           # Final rendered card images

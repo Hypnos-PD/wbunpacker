@@ -650,6 +650,112 @@ struct EmblemFullEntry {
 }
 
 // ---------------------------------------------------------------------------
+// sleeves_full.json 生成
+// ---------------------------------------------------------------------------
+
+/// 从 Sleeve + SleeveCategotyMaster + 多语言 text 生成 sleeves_full.json。
+///
+/// 需要先运行 wbu master -v all 导出所有 5 语言的主数据表。
+///
+/// # 参数
+/// - master_data_dir: exports/master-data/ 目录（下面有 Chs/ Eng/ Jpn/ Kor/ Cht/ 子目录）
+/// - output_path: sleeves_full.json 输出路径
+pub fn generate_sleeves_full(master_data_dir: &Path, output_path: &Path) -> anyhow::Result<usize> {
+    use std::collections::HashMap;
+
+    const SLEEVE_CATEGORY_COLUMN: usize = 3;
+    const SLEEVE_PREMIUM_COLUMN: usize = 4;
+    const SLEEVE_PARENT_COLUMN: usize = 5;
+
+    let chs_dir = master_data_dir.join("Chs");
+    let sleeve_master: Vec<Vec<serde_json::Value>> = read_json_table(&chs_dir, "Sleeve.json")?;
+    let sleeve_category: Vec<Vec<serde_json::Value>> =
+        read_json_table(&chs_dir, "SleeveCategotyMaster.json")?;
+
+    // 分类 ID → text key
+    let cat_key_map: HashMap<i64, String> = sleeve_category
+        .iter()
+        .filter_map(|r| {
+            let id = r[0].as_i64()?;
+            let key = r[1].as_str()?.to_string();
+            Some((id, key))
+        })
+        .collect();
+
+    let mtl_all = load_master_text_labels(master_data_dir)?;
+
+    // 获取多语言 category 文本
+    let get_cat_text = |lang: &str, cat_id: i64| -> String {
+        let text_key = cat_key_map.get(&cat_id).cloned().unwrap_or_default();
+        localized_text(&mtl_all, lang, &text_key)
+    };
+
+    // 构建条目
+    let mut entries: Vec<SleeveFullEntry> = Vec::new();
+    for row in &sleeve_master {
+        let sleeve_id = row[0].as_i64().unwrap_or(0);
+        if sleeve_id == 0 {
+            continue;
+        }
+        let name_jpn = row[1].as_str().unwrap_or("").to_string();
+        let resource_name = row[2].as_str().unwrap_or("").to_string();
+        let category = row[SLEEVE_CATEGORY_COLUMN].as_i64().unwrap_or(0);
+        let is_premium = row[SLEEVE_PREMIUM_COLUMN].as_i64().unwrap_or(0) == 1;
+        let parent_id = row[SLEEVE_PARENT_COLUMN].as_i64().unwrap_or(0);
+
+        // 分类名（5 语言）
+        let cat_chs = get_cat_text("Chs", category);
+        let cat_eng = get_cat_text("Eng", category);
+        let cat_jpn = get_cat_text("Jpn", category);
+        let cat_kor = get_cat_text("Kor", category);
+        let cat_cht = get_cat_text("Cht", category);
+
+        entries.push(SleeveFullEntry {
+            sleeve_id,
+            resource_name,
+            name_jpn,
+            category,
+            category_name_chs: cat_chs,
+            category_name_eng: cat_eng,
+            category_name_jpn: cat_jpn,
+            category_name_kor: cat_kor,
+            category_name_cht: cat_cht,
+            is_premium,
+            parent_sleeve_id: if parent_id != 0 {
+                Some(parent_id)
+            } else {
+                None
+            },
+        });
+    }
+
+    let count = entries.len();
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&entries)?;
+    std::fs::write(output_path, json)?;
+    Ok(count)
+}
+
+/// sleeves_full.json 的单条记录
+#[derive(Debug, Clone, serde::Serialize)]
+struct SleeveFullEntry {
+    sleeve_id: i64,
+    resource_name: String,
+    name_jpn: String,
+    category: i64,
+    category_name_chs: String,
+    category_name_eng: String,
+    category_name_jpn: String,
+    category_name_kor: String,
+    category_name_cht: String,
+    is_premium: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_sleeve_id: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
 // crests_full.json / faiths_full.json 生成
 // ---------------------------------------------------------------------------
 
