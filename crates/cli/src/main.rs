@@ -2,6 +2,7 @@ mod config;
 mod diff_output;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 // ============================================================================
 // CLI 顶层结构
@@ -230,6 +231,21 @@ enum TextureCmd {
         /// 跳过缩放步骤（默认会缩放至 764×1024）
         #[arg(long)]
         no_resize: bool,
+    },
+    /// 提取全部 AssetBundle 的 Texture2D PNG 到指定目录（保留相对路径）
+    All {
+        /// 输出目录（必填）
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+        /// 语言变体: Chs/Eng/Jpn/Kor/Cht，或 all
+        #[arg(short, long, default_value = "Chs")]
+        variant: String,
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+        /// 强制覆盖已存在的 PNG
+        #[arg(short = 'F', long)]
+        force: bool,
     },
 }
 #[derive(Subcommand)]
@@ -1830,6 +1846,37 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_sleeves(data_dir, &as_path, no_resize)?;
+            }
+            TextureCmd::All {
+                output,
+                variant,
+                asset_studio,
+                force,
+            } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                let variants = expand_variants(&variant);
+                let multi = variants.len() > 1;
+                for v in &variants {
+                    let out = if multi {
+                        std::path::Path::new(&output).join(v)
+                    } else {
+                        output.clone()
+                    };
+                    let stats = texture::process_all_textures(data_dir, &out, &as_path, v, force)?;
+                    println!(
+                        "[{v}] 提取完成: {} 目录, {} bundle, {} 纹理 (跳过: {}) -> {}",
+                        stats.dirs_processed,
+                        stats.bundles_processed,
+                        stats.textures_exported,
+                        stats.skipped,
+                        out.display()
+                    );
+                }
             }
         },
         Command::HomeIllust {

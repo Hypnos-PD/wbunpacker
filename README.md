@@ -149,6 +149,8 @@ wbu texture emblems                  # Extract emblem textures
 wbu texture stamps                   # Extract stamp textures
 wbu texture sleeves                  # Extract card back / sleeve textures (764×1024)
 wbu texture home-illust-picts        # Extract home illustration static images
+wbu texture all -o <dir>              # Extract all Texture2D to a directory (keeps relative path)
+wbu texture all -o <dir> -v all       # All language variants
 wbu render cards                     # Batch render full card images
 wbu render card --id 100101          # Render a single card
 ```

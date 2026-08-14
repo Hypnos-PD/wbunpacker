@@ -206,6 +206,134 @@ pub fn process_stamps(
     extract_stamps(data_dir, asset_studio_path, variant)
 }
 
+/// 全量纹理提取统计
+#[derive(Debug, Default)]
+pub struct AllTexturesStats {
+    pub dirs_processed: usize,
+    pub bundles_processed: usize,
+    pub textures_exported: usize,
+    pub skipped: usize,
+}
+
+/// 提取全部 AssetBundle 的 Texture2D PNG 到指定目录（保留相对路径）。
+///
+/// 流程:
+/// 1. 递归扫描 variants/{variant}/decrypted/，收集所有含 .ab 文件的目录
+/// 2. 对每个目录调用 AssetStudio tex2d 导出
+/// 3. 按 bundle 相对路径映射到 output_dir
+pub fn process_all_textures(
+    data_dir: &Path,
+    output_dir: &Path,
+    asset_studio_path: &Path,
+    variant: &str,
+    force: bool,
+) -> anyhow::Result<AllTexturesStats> {
+    let source_root = data_dir.join("variants").join(variant).join("decrypted");
+
+    if !source_root.exists() {
+        anyhow::bail!(
+            "解密目录不存在: {}（请先运行 wbu asset batch -v {variant}）",
+            source_root.display()
+        );
+    }
+
+    std::fs::create_dir_all(output_dir)?;
+
+    // 收集所有含 .ab 文件的目录（绝对路径, 相对 decrypted/ 的路径）
+    let mut dirs: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for entry in walkdir::WalkDir::new(&source_root) {
+        let entry = entry?;
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let has_ab = std::fs::read_dir(entry.path())?
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                    && e.path().extension().is_some_and(|x| x == "ab")
+            });
+        if has_ab {
+            let rel = entry.path().strip_prefix(&source_root).unwrap_or(entry.path());
+            dirs.push((entry.path().to_path_buf(), rel.to_path_buf()));
+        }
+    }
+    dirs.sort_by_key(|(_, rel)| rel.clone());
+
+    let mut stats = AllTexturesStats::default();
+    let temp_output = output_dir.join(".temp_output");
+
+    for (dir, rel) in &dirs {
+        if temp_output.exists() {
+            std::fs::remove_dir_all(&temp_output)?;
+        }
+        std::fs::create_dir_all(&temp_output)?;
+
+        // 收集该目录下的 .ab 文件
+        let bundles: Vec<_> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                    && e.path().extension().is_some_and(|x| x == "ab")
+            })
+            .collect();
+
+        run_asset_studio_on_dir(dir, &temp_output, asset_studio_path, false)?;
+        stats.dirs_processed += 1;
+
+        for entry in &bundles {
+            let name = entry.file_name().to_string_lossy().to_string();
+            stats.bundles_processed += 1;
+
+            // AssetStudio 输出: {name}.ab_export/**/*.png（name 含 .ab 后缀）
+            let export_dir = temp_output.join(format!("{name}_export"));
+            let Ok(pngs) = find_pngs(&export_dir) else {
+                continue;
+            };
+            if pngs.is_empty() {
+                continue;
+            }
+
+            let stem = name.strip_suffix(".ab").unwrap_or(&name).to_string();
+            let dest_dir = output_dir.join(rel);
+            std::fs::create_dir_all(&dest_dir)?;
+
+            if pngs.len() == 1 {
+                let dest = dest_dir.join(format!("{stem}.png"));
+                if dest.exists() && !force {
+                    stats.skipped += 1;
+                    continue;
+                }
+                if dest.exists() {
+                    std::fs::remove_file(&dest)?;
+                }
+                std::fs::rename(&pngs[0], &dest)?;
+                stats.textures_exported += 1;
+            } else {
+                for png in pngs {
+                    let asset_name = png
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let dest = dest_dir.join(format!("{stem}__{asset_name}.png"));
+                    if dest.exists() && !force {
+                        stats.skipped += 1;
+                        continue;
+                    }
+                    if dest.exists() {
+                        std::fs::remove_file(&dest)?;
+                    }
+                    std::fs::rename(&png, &dest)?;
+                    stats.textures_exported += 1;
+                }
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_output);
+
+    Ok(stats)
+}
+
 /// 渲染单张完整卡牌图。
 pub fn render_card_image(
     data_dir: &Path,
