@@ -111,6 +111,7 @@ pub fn process_leader_skins(
                 &output_dir,
                 asset_studio_path,
                 &source_hash,
+                variant,
             ) {
                 Ok(()) => stats.processed += 1,
                 Err(error) => {
@@ -151,11 +152,15 @@ fn extract_one(
     output_dir: &Path,
     asset_studio_path: &Path,
     source_hash: &str,
+    variant: &str,
 ) -> anyhow::Result<()> {
     let stem = bundle
         .file_stem()
         .and_then(|value| value.to_str())
         .context("invalid LeaderSkin bundle name")?;
+    let (kind, id) = stem
+        .split_once('_')
+        .context("invalid LeaderSkin bundle stem")?;
     let temp_dir = output_dir.with_file_name(format!("_tmp_{stem}"));
     if output_dir.exists() {
         fs::remove_dir_all(output_dir)?;
@@ -165,53 +170,97 @@ fn extract_one(
     }
     fs::create_dir_all(&temp_dir)?;
 
-    run_asset_studio(bundle, &temp_dir, asset_studio_path)?;
-    let exported = find_exported_files(&temp_dir, stem)?;
-    let (kind, id) = stem
-        .split_once('_')
-        .context("invalid LeaderSkin bundle stem")?;
-    let skel_meta = extract_skel_metadata(&exported.skel, kind)?;
-    let num_id: i64 = id.parse()?;
-    let (name, names) = load_leader_skin_name(data_dir, num_id).unwrap_or_else(|| {
-        let mut map = BTreeMap::new();
-        map.insert("jpn".to_string(), stem.to_string());
-        (stem.to_string(), map)
-    });
-
-    fs::create_dir_all(output_dir)?;
-    fs::copy(&exported.skel, output_dir.join(format!("{stem}.skel")))?;
-    copy_atlas_with_page_name(
-        &exported.atlas,
-        &output_dir.join(format!("{stem}.atlas")),
-        Some(&exported.png),
-        &format!("{stem}.png"),
-    )?;
-    fs::copy(&exported.png, output_dir.join(format!("{stem}.png")))?;
-
-    let config = LeaderSkinConfig {
-        config_version: CONFIG_VERSION,
-        id: stem.to_string(),
-        kind: kind.to_string(),
-        num_id,
-        source_hash: source_hash.to_string(),
-        name,
-        names,
-        animations: skel_meta.animations,
-        idle_animation: skel_meta.idle_animation,
-        skins: skel_meta.skins,
-        skin: skel_meta.skin,
-        premultiplied_alpha: atlas_has_pma(&exported.atlas)?,
-        skel: format!("{stem}.skel"),
-        atlas: format!("{stem}.atlas"),
-        png: format!("{stem}.png"),
+    let exported = match extract_exported_files(bundle, &temp_dir, asset_studio_path, stem) {
+        Ok(files) => files,
+        Err(first_error) => {
+            // 新领袖把 Spine 骨架拆到 Battle/Timeline/Evolve_{id}.ab / Excite_{id}.ab，
+            // prefab bundle 里只有元数据，需要回退到这些依赖 bundle 里找骨架。
+            let timeline_dir = data_dir
+                .join("variants")
+                .join(variant)
+                .join("decrypted")
+                .join("Battle")
+                .join("Timeline");
+            let mut last_error = first_error;
+            let mut found = None;
+            for name in [format!("Evolve_{id}.ab"), format!("Excite_{id}.ab")] {
+                let dependency = timeline_dir.join(&name);
+                if !dependency.exists() {
+                    continue;
+                }
+                match extract_exported_files(&dependency, &temp_dir, asset_studio_path, stem) {
+                    Ok(files) => {
+                        found = Some(files);
+                        break;
+                    }
+                    Err(error) => last_error = error,
+                }
+            }
+            match found {
+                Some(files) => files,
+                None => {
+                    let _ = fs::remove_dir_all(&temp_dir);
+                    return Err(last_error);
+                }
+            }
+        }
     };
-    fs::write(
-        output_dir.join("config.json"),
-        serde_json::to_string_pretty(&config)? + "\n",
-    )?;
+
+    let result = (|| -> anyhow::Result<()> {
+        let skel_meta = extract_skel_metadata(&exported.skel, kind)?;
+        let num_id: i64 = id.parse()?;
+        let (name, names) = load_leader_skin_name(data_dir, num_id).unwrap_or_else(|| {
+            let mut map = BTreeMap::new();
+            map.insert("jpn".to_string(), stem.to_string());
+            (stem.to_string(), map)
+        });
+
+        fs::create_dir_all(output_dir)?;
+        fs::copy(&exported.skel, output_dir.join(format!("{stem}.skel")))?;
+        copy_atlas_with_page_name(
+            &exported.atlas,
+            &output_dir.join(format!("{stem}.atlas")),
+            Some(&exported.png),
+            &format!("{stem}.png"),
+        )?;
+        fs::copy(&exported.png, output_dir.join(format!("{stem}.png")))?;
+
+        let config = LeaderSkinConfig {
+            config_version: CONFIG_VERSION,
+            id: stem.to_string(),
+            kind: kind.to_string(),
+            num_id,
+            source_hash: source_hash.to_string(),
+            name,
+            names,
+            animations: skel_meta.animations,
+            idle_animation: skel_meta.idle_animation,
+            skins: skel_meta.skins,
+            skin: skel_meta.skin,
+            premultiplied_alpha: atlas_has_pma(&exported.atlas)?,
+            skel: format!("{stem}.skel"),
+            atlas: format!("{stem}.atlas"),
+            png: format!("{stem}.png"),
+        };
+        fs::write(
+            output_dir.join("config.json"),
+            serde_json::to_string_pretty(&config)? + "\n",
+        )?;
+        Ok(())
+    })();
 
     let _ = fs::remove_dir_all(&temp_dir);
-    Ok(())
+    result
+}
+
+fn extract_exported_files(
+    bundle: &Path,
+    temp_dir: &Path,
+    asset_studio_path: &Path,
+    stem: &str,
+) -> anyhow::Result<ExportedFiles> {
+    run_asset_studio(bundle, temp_dir, asset_studio_path)?;
+    find_exported_files(temp_dir, stem)
 }
 
 #[derive(Debug)]
