@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "asset"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -181,7 +181,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "audio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "anyhow",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "manifest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "hex",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "master-data"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "lz4_flex",
@@ -1259,7 +1259,7 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
 name = "metadb"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -2217,7 +2217,7 @@ dependencies = [
 
 [[package]]
 name = "texture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2668,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "wbunpacker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "asset",
