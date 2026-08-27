@@ -10,7 +10,7 @@ use std::process::Command;
 
 const UNITY_VERSION: &str = "2022.3.62f2";
 const LEADER_SKIN_DIR: &str = "Prefabs/LeaderSkin";
-const CONFIG_VERSION: u32 = 20;
+const CONFIG_VERSION: u32 = 21;
 
 #[derive(Debug, Default)]
 pub struct LeaderSkinStats {
@@ -324,13 +324,6 @@ fn load_leader_skin_name(
     let text = fs::read_to_string(ls_path).ok()?;
     let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&text).ok()?;
 
-    let ent_key = rows
-        .iter()
-        .find(|row| row.first().and_then(|value| value.as_i64()) == Some(num_id))
-        .and_then(|row| row.get(9))
-        .and_then(|value| value.as_i64())
-        .map(|label_id| format!("ENT_{label_id}"));
-
     let jpn_name = rows
         .iter()
         .find(|row| row.first().and_then(|value| value.as_i64()) == Some(num_id))
@@ -341,26 +334,24 @@ fn load_leader_skin_name(
     let name = jpn_name.clone()?;
     let mut names = BTreeMap::new();
 
-    // Look up localized names from MasterTextLabel if ENT key is available
-    if let Some(ref key) = ent_key {
-        let lang_variants = [
-            ("Chs", "chs"),
-            ("Cht", "cht"),
-            ("Eng", "eng"),
-            ("Jpn", "jpn"),
-            ("Kor", "kor"),
-        ];
-        for (variant, lang_code) in lang_variants {
-            let mtl_path = master_root.join(variant).join("MasterTextLabel.json");
-            if let Ok(mtl_text) = fs::read_to_string(&mtl_path)
-                && let Ok(mtl_data) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&mtl_text)
-                && let Some(row) = mtl_data
-                    .iter()
-                    .find(|r| r.first().and_then(|v| v.as_str()) == Some(key.as_str()))
-                && let Some(localized) = row.get(1).and_then(|v| v.as_str())
-            {
-                names.insert(lang_code.to_string(), localized.to_string());
-            }
+    let key = format!("LSPT_N{num_id}");
+    let lang_variants = [
+        ("Chs", "chs"),
+        ("Cht", "cht"),
+        ("Eng", "eng"),
+        ("Jpn", "jpn"),
+        ("Kor", "kor"),
+    ];
+    for (variant, lang_code) in lang_variants {
+        let mtl_path = master_root.join(variant).join("MasterTextLabel.json");
+        if let Ok(mtl_text) = fs::read_to_string(&mtl_path)
+            && let Ok(mtl_data) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&mtl_text)
+            && let Some(row) = mtl_data
+                .iter()
+                .find(|r| r.first().and_then(|v| v.as_str()) == Some(key.as_str()))
+            && let Some(localized) = row.get(1).and_then(|v| v.as_str())
+        {
+            names.insert(lang_code.to_string(), localized.to_string());
         }
     }
 
