@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::debug;
 
+pub mod foil;
 pub mod home_illust;
 pub mod leader_skin;
 

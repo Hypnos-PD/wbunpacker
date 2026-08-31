@@ -151,6 +151,8 @@ wbu texture sleeves                  # 提取卡背贴图（764×1024，跳过 p
 wbu texture home-illust-picts        # 提取主界面插图静态图
 wbu texture all -o <目录>             # 提取全部 Texture2D 到指定目录（保留相对路径）
 wbu texture all -o <目录> -v all      # 全部语言变体
+wbu foil -o <目录>                     # 导出普通卡闪卡材质（排除 7 开头珍藏卡）
+wbu foil --id 10114110 -o <目录>       # 按 card_id 导出一张卡的基础/进化闪卡
 wbu render cards                     # 批量渲染完整卡牌图
 wbu render card --id 100101          # 渲染单张卡牌
 ```

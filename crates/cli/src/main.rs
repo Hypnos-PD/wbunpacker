@@ -68,6 +68,24 @@ enum Command {
         #[arg(long)]
         asset_studio: Option<String>,
     },
+    /// 导出普通卡闪卡材质和依赖纹理（排除 7 开头珍藏卡）
+    Foil {
+        /// 语言变体: Chs/Eng/Jpn/Kor/Cht
+        #[arg(short, long, default_value = "Chs")]
+        variant: String,
+        /// 输出目录（默认 <data_dir>/exports/foil-materials）
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// 只导出指定 card_id/card_style_id/material_id
+        #[arg(long)]
+        id: Option<i64>,
+        /// 强制重新解析材质和导出纹理
+        #[arg(short = 'F', long)]
+        force: bool,
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+    },
     /// 提取 LeaderSkin Spine 动画 → Web 可用格式（skel/atlas/png + config.json）
     LeaderSkin {
         /// 语言变体: Chs/Eng/Jpn/Kor/Cht
@@ -1901,6 +1919,32 @@ async fn main() -> anyhow::Result<()> {
             println!(
                 "HomeIllustration 提取完成: {} | 跳过: {} | 失败: {}",
                 stats.processed, stats.skipped, stats.failed
+            );
+        }
+        Command::Foil {
+            variant,
+            output,
+            id,
+            force,
+            asset_studio,
+        } => {
+            let cfg = config::load()?;
+            let as_path = match &asset_studio {
+                Some(path) => std::path::PathBuf::from(path),
+                None => std::path::PathBuf::from(&cfg.asset_studio_path),
+            };
+            let data_dir = std::path::Path::new(&cfg.data_dir);
+            let stats = texture::foil::process_foil_materials(
+                data_dir,
+                &as_path,
+                &variant,
+                output.as_deref(),
+                id,
+                force,
+            )?;
+            println!(
+                "普通闪卡材质导出完成: {} | 跳过: {} | 纹理: {} | 失败: {}",
+                stats.processed, stats.skipped, stats.textures, stats.failed
             );
         }
         Command::LeaderSkin {
