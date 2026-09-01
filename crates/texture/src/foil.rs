@@ -99,6 +99,43 @@ struct FoilIndex {
     items: Vec<FoilIndexItem>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct SleeveMetadata {
+    sleeve_id: i64,
+    resource_name: String,
+    is_premium: bool,
+    parent_sleeve_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SleeveFoilMaterial {
+    config_version: u32,
+    id: String,
+    sleeve_id: i64,
+    parent_sleeve_id: Option<i64>,
+    source_hash: String,
+    keywords: Vec<String>,
+    textures: BTreeMap<String, TextureEnv>,
+    floats: BTreeMap<String, f32>,
+    colors: BTreeMap<String, [f32; 4]>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SleeveFoilIndexItem {
+    id: String,
+    sleeve_id: i64,
+    parent_sleeve_id: Option<i64>,
+    config: String,
+    preview: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SleeveFoilIndex {
+    config_version: u32,
+    variant: String,
+    items: Vec<SleeveFoilIndexItem>,
+}
+
 #[derive(Debug, Default)]
 struct RawTextureEnv {
     file_id: i32,
@@ -224,6 +261,191 @@ pub fn process_foil_materials(
     Ok(stats)
 }
 
+/// Export premium sleeve materials into a browser-friendly directory.
+pub fn process_foil_sleeves(
+    data_dir: &Path,
+    asset_studio_path: &Path,
+    variant: &str,
+    output: Option<&Path>,
+    only_id: Option<i64>,
+    force: bool,
+) -> anyhow::Result<FoilStats> {
+    let decrypted = data_dir.join("variants").join(variant).join("decrypted");
+    let material_dir = decrypted.join("Sleeve/Materials");
+    if !material_dir.exists() {
+        bail!("闪背材质目录不存在: {}", material_dir.display());
+    }
+
+    let metadata_path = data_dir.join("exports/analysis/sleeves_full.json");
+    let mut sleeves: Vec<SleeveMetadata> =
+        serde_json::from_str(&fs::read_to_string(&metadata_path).with_context(|| {
+            format!(
+                "无法读取 {}，请先运行 wbu master sleeves",
+                metadata_path.display()
+            )
+        })?)?;
+    sleeves.retain(|sleeve| sleeve.is_premium);
+    if sleeves.is_empty()
+        || only_id.is_some_and(|id| !sleeves.iter().any(|sleeve| sleeve.sleeve_id == id))
+    {
+        bail!("没有找到符合条件的 premium 卡背");
+    }
+
+    let dependency_prefixes = [
+        "Card/Common/Foil/Textures/",
+        "Assets/_Wizard2Resources/Sleeve/Textures/",
+    ];
+    let manifest_path = data_dir
+        .join("manifests/json")
+        .join(format!("assetbundle.{variant}.manifest.json"));
+    let manifest: ManifestDocument = serde_json::from_str(
+        &fs::read_to_string(&manifest_path)
+            .with_context(|| format!("无法读取 {}", manifest_path.display()))?,
+    )?;
+    let manifest_by_id: HashMap<i64, &ManifestAsset> = manifest
+        .assets
+        .iter()
+        .map(|asset| (asset.asset_id, asset))
+        .collect();
+    let manifest_by_name: HashMap<&str, &ManifestAsset> = manifest
+        .assets
+        .iter()
+        .map(|asset| (asset.name.as_str(), asset))
+        .collect();
+
+    let output_root = output
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| data_dir.join("exports/foil-sleeves"));
+    let config_dir = output_root.join("materials");
+    let texture_dir = output_root.join("textures");
+    fs::create_dir_all(&config_dir)?;
+    fs::create_dir_all(&texture_dir)?;
+
+    let mut pending = Vec::new();
+    let mut expected_hashes = HashMap::new();
+    let mut total = 0usize;
+    for sleeve in &sleeves {
+        let bundle = material_dir.join(format!("{}_M.ab", sleeve.resource_name));
+        if !bundle.exists() {
+            tracing::warn!("{}: 闪背材质包不存在", sleeve.sleeve_id);
+            continue;
+        }
+        let material_name = format!("Sleeve/Materials/{}_M", sleeve.resource_name);
+        let source_hash = sha256_with_dependencies(
+            &bundle,
+            &material_name,
+            &manifest_by_name,
+            &manifest_by_id,
+            &decrypted,
+            &dependency_prefixes,
+        )?;
+        expected_hashes.insert(sleeve.sleeve_id, source_hash.clone());
+        if only_id.is_some_and(|id| id != sleeve.sleeve_id) {
+            continue;
+        }
+        total += 1;
+        let config_path = config_dir.join(format!("{}.json", sleeve.sleeve_id));
+        if force || !sleeve_config_hash_matches(&config_path, &source_hash) {
+            pending.push((sleeve.clone(), bundle, source_hash));
+        }
+    }
+    if total == 0 {
+        bail!("指定 premium 卡背的材质包不存在");
+    }
+
+    let mut stats = FoilStats::default();
+    stats.skipped = total.saturating_sub(pending.len());
+    if !pending.is_empty() {
+        let assets: Vec<(i64, String)> = pending
+            .iter()
+            .map(|(sleeve, _, _)| {
+                (
+                    sleeve.sleeve_id,
+                    format!("Sleeve/Materials/{}_M", sleeve.resource_name),
+                )
+            })
+            .collect();
+        let (source_maps, dependency_bundles) = build_texture_source_maps_for_assets(
+            data_dir,
+            &decrypted,
+            asset_studio_path,
+            variant,
+            &assets,
+            &dependency_prefixes,
+        )?;
+        let material_bundles: Vec<PathBuf> =
+            pending.iter().map(|(_, path, _)| path.clone()).collect();
+        let before_textures = count_png_files(&texture_dir);
+        batch_export_textures(
+            &dependency_bundles,
+            &texture_dir,
+            asset_studio_path,
+            "导出闪背特效纹理",
+        )?;
+        batch_export_textures(
+            &material_bundles,
+            &texture_dir,
+            asset_studio_path,
+            "导出闪背本地纹理",
+        )?;
+        validate_exported_textures(&texture_dir)?;
+        stats.textures = count_png_files(&texture_dir).saturating_sub(before_textures);
+        process_sleeve_material_batches(
+            &pending,
+            &source_maps,
+            &config_dir,
+            asset_studio_path,
+            &mut stats,
+        )?;
+    }
+
+    let mut items = collect_sleeve_index_items(&config_dir, &expected_hashes, only_id);
+    items.sort_by_key(|item| item.sleeve_id);
+    let index = SleeveFoilIndex {
+        config_version: CONFIG_VERSION,
+        variant: variant.to_string(),
+        items,
+    };
+    fs::write(
+        output_root.join("index.json"),
+        serde_json::to_string_pretty(&index)? + "\n",
+    )?;
+    Ok(stats)
+}
+
+fn collect_sleeve_index_items(
+    config_dir: &Path,
+    expected_hashes: &HashMap<i64, String>,
+    only_id: Option<i64>,
+) -> Vec<SleeveFoilIndexItem> {
+    let Ok(entries) = fs::read_dir(config_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| {
+            serde_json::from_str::<SleeveFoilMaterial>(&fs::read_to_string(entry.path()).ok()?).ok()
+        })
+        .filter(|material| {
+            material.config_version == CONFIG_VERSION
+                && expected_hashes.contains_key(&material.sleeve_id)
+                && (only_id.is_some_and(|id| id != material.sleeve_id)
+                    || expected_hashes.get(&material.sleeve_id) == Some(&material.source_hash))
+        })
+        .map(|material| SleeveFoilIndexItem {
+            id: material.id.clone(),
+            sleeve_id: material.sleeve_id,
+            parent_sleeve_id: material.parent_sleeve_id,
+            config: format!("materials/{}.json", material.id),
+            preview: material
+                .textures
+                .get("_MainTex")
+                .and_then(|texture| texture.texture.clone()),
+        })
+        .collect()
+}
+
 fn collect_index_items(config_dir: &Path) -> Vec<FoilIndexItem> {
     let Ok(entries) = fs::read_dir(config_dir) else {
         return Vec::new();
@@ -277,6 +499,31 @@ fn build_texture_source_maps(
     variant: &str,
     material_ids: &[i64],
 ) -> anyhow::Result<(HashMap<i64, HashMap<i64, PathBuf>>, Vec<PathBuf>)> {
+    let assets: Vec<(i64, String)> = material_ids
+        .iter()
+        .map(|id| (*id, format!("Card/Materials/{id}_M")))
+        .collect();
+    build_texture_source_maps_for_assets(
+        data_dir,
+        decrypted,
+        asset_studio_path,
+        variant,
+        &assets,
+        &[
+            "Card/Common/Foil/Textures/",
+            "Assets/_Wizard2Resources/Card/Textures/",
+        ],
+    )
+}
+
+fn build_texture_source_maps_for_assets(
+    data_dir: &Path,
+    decrypted: &Path,
+    asset_studio_path: &Path,
+    variant: &str,
+    assets: &[(i64, String)],
+    dependency_prefixes: &[&str],
+) -> anyhow::Result<(HashMap<i64, HashMap<i64, PathBuf>>, Vec<PathBuf>)> {
     let manifest_path = data_dir
         .join("manifests/json")
         .join(format!("assetbundle.{variant}.manifest.json"));
@@ -296,8 +543,7 @@ fn build_texture_source_maps(
         .collect();
     let mut candidates = HashSet::new();
     let mut material_candidates: HashMap<i64, Vec<PathBuf>> = HashMap::new();
-    for material_id in material_ids {
-        let material_name = format!("Card/Materials/{material_id}_M");
+    for (material_id, material_name) in assets {
         let Some(material) = by_name.get(material_name.as_str()) else {
             continue;
         };
@@ -305,10 +551,9 @@ fn build_texture_source_maps(
             let Some(dependency) = by_id.get(dependency_id) else {
                 continue;
             };
-            if dependency.name.starts_with("Card/Common/Foil/Textures/")
-                || dependency
-                    .name
-                    .starts_with("Assets/_Wizard2Resources/Card/Textures/")
+            if dependency_prefixes
+                .iter()
+                .any(|prefix| dependency.name.starts_with(prefix))
             {
                 let path = decrypted.join(format!("{}.ab", dependency.name));
                 candidates.insert(path.clone());
@@ -349,6 +594,27 @@ fn export_one_from_files(
     config_path: &Path,
     texture_sources: &HashMap<i64, PathBuf>,
 ) -> anyhow::Result<FoilMaterial> {
+    let (parsed, textures) = resolve_material(files, texture_sources)?;
+    let material = FoilMaterial {
+        config_version: CONFIG_VERSION,
+        id: id.to_string(),
+        card_style_id,
+        material_id,
+        source_hash,
+        keywords: parsed.keywords,
+        textures,
+        floats: parsed.floats,
+        colors: parsed.colors,
+        presentation,
+    };
+    fs::write(config_path, serde_json::to_string_pretty(&material)? + "\n")?;
+    Ok(material)
+}
+
+fn resolve_material(
+    files: &[PathBuf],
+    texture_sources: &HashMap<i64, PathBuf>,
+) -> anyhow::Result<(ParsedMaterial, BTreeMap<String, TextureEnv>)> {
     let material_dump = files
         .iter()
         .find(|path| is_dump_type(path, "Material Base"))
@@ -357,7 +623,7 @@ fn export_one_from_files(
     let local_textures = parse_local_textures(&files);
 
     let mut textures = BTreeMap::new();
-    for (property, raw) in parsed.textures {
+    for (property, raw) in &parsed.textures {
         let texture = if raw.path_id == 0 {
             None
         } else if raw.file_id == 0 {
@@ -380,7 +646,7 @@ fn export_one_from_files(
             }
         };
         textures.insert(
-            property,
+            property.clone(),
             TextureEnv {
                 texture,
                 file_id: raw.file_id,
@@ -391,20 +657,7 @@ fn export_one_from_files(
         );
     }
 
-    let material = FoilMaterial {
-        config_version: CONFIG_VERSION,
-        id: id.to_string(),
-        card_style_id,
-        material_id,
-        source_hash,
-        keywords: parsed.keywords,
-        textures,
-        floats: parsed.floats,
-        colors: parsed.colors,
-        presentation,
-    };
-    fs::write(config_path, serde_json::to_string_pretty(&material)? + "\n")?;
-    Ok(material)
+    Ok((parsed, textures))
 }
 
 fn presentation_card_id(card_style_id: i64) -> i64 {
@@ -690,6 +943,64 @@ fn process_material_batches(
     Ok(())
 }
 
+fn process_sleeve_material_batches(
+    pending: &[(SleeveMetadata, PathBuf, String)],
+    source_maps: &HashMap<i64, HashMap<i64, PathBuf>>,
+    config_dir: &Path,
+    asset_studio_path: &Path,
+    stats: &mut FoilStats,
+) -> anyhow::Result<()> {
+    let bar = progress("转换闪背材质", pending.len());
+    for chunk in pending.chunks(BATCH_SIZE) {
+        let paths: Vec<PathBuf> = chunk.iter().map(|(_, path, _)| path.clone()).collect();
+        let (stage, _) = stage_batch(&paths)?;
+        let output = TempDir::new()?;
+        run_asset_studio_dump_batch(stage.path(), output.path(), asset_studio_path)?;
+        for (sleeve, bundle, source_hash) in chunk {
+            let group_name = format!(
+                "{}_export",
+                bundle
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+            );
+            let files = collect_files(&output.path().join(group_name));
+            let result = source_maps
+                .get(&sleeve.sleeve_id)
+                .context("闪背纹理依赖索引缺失")
+                .and_then(|sources| resolve_material(&files, sources))
+                .and_then(|(parsed, textures)| {
+                    let material = SleeveFoilMaterial {
+                        config_version: CONFIG_VERSION,
+                        id: sleeve.sleeve_id.to_string(),
+                        sleeve_id: sleeve.sleeve_id,
+                        parent_sleeve_id: sleeve.parent_sleeve_id,
+                        source_hash: source_hash.clone(),
+                        keywords: parsed.keywords,
+                        textures,
+                        floats: parsed.floats,
+                        colors: parsed.colors,
+                    };
+                    fs::write(
+                        config_dir.join(format!("{}.json", sleeve.sleeve_id)),
+                        serde_json::to_string_pretty(&material)? + "\n",
+                    )?;
+                    Ok(material)
+                });
+            match result {
+                Ok(_) => stats.processed += 1,
+                Err(error) => {
+                    tracing::error!("{}: {error:#}", sleeve.sleeve_id);
+                    stats.failed += 1;
+                }
+            }
+            bar.inc(1);
+        }
+    }
+    bar.finish_and_clear();
+    Ok(())
+}
+
 fn count_png_files(dir: &Path) -> usize {
     fs::read_dir(dir)
         .map(|entries| {
@@ -911,10 +1222,50 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn sha256_with_dependencies(
+    bundle: &Path,
+    material_name: &str,
+    manifest_by_name: &HashMap<&str, &ManifestAsset>,
+    manifest_by_id: &HashMap<i64, &ManifestAsset>,
+    decrypted: &Path,
+    dependency_prefixes: &[&str],
+) -> anyhow::Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(fs::read(bundle)?);
+    if let Some(material) = manifest_by_name.get(material_name) {
+        for dependency_id in &material.all_dependencies {
+            let Some(dependency) = manifest_by_id.get(dependency_id) else {
+                continue;
+            };
+            if !dependency_prefixes
+                .iter()
+                .any(|prefix| dependency.name.starts_with(prefix))
+            {
+                continue;
+            }
+            hasher.update(dependency.name.as_bytes());
+            let path = decrypted.join(format!("{}.ab", dependency.name));
+            if path.exists() {
+                hasher.update(fs::read(path)?);
+            }
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn config_hash_matches(path: &Path, hash: &str) -> bool {
     read_material(path)
         .map(|material| material.config_version == CONFIG_VERSION && material.source_hash == hash)
         .unwrap_or(false)
+}
+
+fn sleeve_config_hash_matches(path: &Path, hash: &str) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|value| serde_json::from_str::<SleeveFoilMaterial>(&value).ok())
+        .is_some_and(|material| {
+            material.config_version == CONFIG_VERSION && material.source_hash == hash
+        })
 }
 
 fn read_material(path: &Path) -> anyhow::Result<FoilMaterial> {
@@ -996,5 +1347,87 @@ map m_Colors
 
         fs::write(dir.path().join("empty.png"), []).unwrap();
         assert!(validate_exported_textures(dir.path()).is_err());
+    }
+
+    #[test]
+    fn sleeve_index_only_includes_current_source_hashes() {
+        let dir = TempDir::new().unwrap();
+        let material = SleeveFoilMaterial {
+            config_version: CONFIG_VERSION,
+            id: "123".to_string(),
+            sleeve_id: 123,
+            parent_sleeve_id: None,
+            source_hash: "current".to_string(),
+            keywords: Vec::new(),
+            textures: BTreeMap::new(),
+            floats: BTreeMap::new(),
+            colors: BTreeMap::new(),
+        };
+        fs::write(
+            dir.path().join("123.json"),
+            serde_json::to_string(&material).unwrap(),
+        )
+        .unwrap();
+
+        let expected = HashMap::from([(123, "current".to_string())]);
+        assert_eq!(
+            collect_sleeve_index_items(dir.path(), &expected, None).len(),
+            1
+        );
+        let stale = HashMap::from([(123, "new".to_string())]);
+        assert!(collect_sleeve_index_items(dir.path(), &stale, None).is_empty());
+        assert_eq!(
+            collect_sleeve_index_items(dir.path(), &stale, Some(999)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn sleeve_source_hash_includes_dependency_content() {
+        let dir = TempDir::new().unwrap();
+        let bundle = dir.path().join("sleeve.ab");
+        fs::write(&bundle, b"material").unwrap();
+        let dependency_name = "Card/Common/Foil/Textures/effect";
+        let dependency = dir.path().join(format!("{dependency_name}.ab"));
+        fs::create_dir_all(dependency.parent().unwrap()).unwrap();
+        fs::write(&dependency, b"first").unwrap();
+
+        let assets = [
+            ManifestAsset {
+                name: "Sleeve/Materials/sleeve_123_M".to_string(),
+                asset_id: 1,
+                all_dependencies: vec![2],
+            },
+            ManifestAsset {
+                name: dependency_name.to_string(),
+                asset_id: 2,
+                all_dependencies: Vec::new(),
+            },
+        ];
+        let by_name = assets
+            .iter()
+            .map(|asset| (asset.name.as_str(), asset))
+            .collect();
+        let by_id = assets.iter().map(|asset| (asset.asset_id, asset)).collect();
+        let first = sha256_with_dependencies(
+            &bundle,
+            "Sleeve/Materials/sleeve_123_M",
+            &by_name,
+            &by_id,
+            dir.path(),
+            &["Card/Common/Foil/Textures/"],
+        )
+        .unwrap();
+        fs::write(&dependency, b"second").unwrap();
+        let second = sha256_with_dependencies(
+            &bundle,
+            "Sleeve/Materials/sleeve_123_M",
+            &by_name,
+            &by_id,
+            dir.path(),
+            &["Card/Common/Foil/Textures/"],
+        )
+        .unwrap();
+        assert_ne!(first, second);
     }
 }

@@ -70,10 +70,13 @@ enum Command {
     },
     /// 导出普通卡闪卡材质和依赖纹理（排除 7 开头珍藏卡）
     Foil {
+        /// 导出 premium 卡背材质（默认导出普通卡闪卡材质）
+        #[arg(long)]
+        sleeves: bool,
         /// 语言变体: Chs/Eng/Jpn/Kor/Cht
         #[arg(short, long, default_value = "Chs")]
         variant: String,
-        /// 输出目录（默认 <data_dir>/exports/foil-materials）
+        /// 输出目录（默认 <data_dir>/exports/foil-materials 或 foil-sleeves）
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// 只导出指定 card_id/card_style_id/material_id
@@ -1922,6 +1925,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Command::Foil {
+            sleeves,
             variant,
             output,
             id,
@@ -1934,17 +1938,32 @@ async fn main() -> anyhow::Result<()> {
                 None => std::path::PathBuf::from(&cfg.asset_studio_path),
             };
             let data_dir = std::path::Path::new(&cfg.data_dir);
-            let stats = texture::foil::process_foil_materials(
-                data_dir,
-                &as_path,
-                &variant,
-                output.as_deref(),
-                id,
-                force,
-            )?;
+            let stats = if sleeves {
+                texture::foil::process_foil_sleeves(
+                    data_dir,
+                    &as_path,
+                    &variant,
+                    output.as_deref(),
+                    id,
+                    force,
+                )?
+            } else {
+                texture::foil::process_foil_materials(
+                    data_dir,
+                    &as_path,
+                    &variant,
+                    output.as_deref(),
+                    id,
+                    force,
+                )?
+            };
             println!(
-                "普通闪卡材质导出完成: {} | 跳过: {} | 纹理: {} | 失败: {}",
-                stats.processed, stats.skipped, stats.textures, stats.failed
+                "{}材质导出完成: {} | 跳过: {} | 纹理: {} | 失败: {}",
+                if sleeves { "闪背" } else { "普通闪卡" },
+                stats.processed,
+                stats.skipped,
+                stats.textures,
+                stats.failed
             );
         }
         Command::LeaderSkin {
