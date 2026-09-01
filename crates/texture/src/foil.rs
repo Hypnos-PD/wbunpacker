@@ -197,6 +197,7 @@ pub fn process_foil_materials(
             asset_studio_path,
             "导出遮罩纹理",
         )?;
+        validate_exported_textures(&texture_dir)?;
         stats.textures = count_png_files(&texture_dir).saturating_sub(before_textures);
 
         process_material_batches(
@@ -562,10 +563,13 @@ fn run_asset_studio_texture_batch(
             "none",
             "-f",
             "assetName",
+            "-r",
             "-o",
             &output.to_string_lossy(),
             "--unity-version",
             UNITY_VERSION,
+            "--max-export-tasks",
+            "1",
             "--log-level",
             "error",
         ])
@@ -695,6 +699,24 @@ fn count_png_files(dir: &Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+fn validate_exported_textures(dir: &Path) -> anyhow::Result<()> {
+    let empty: Vec<String> = fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+        .filter_map(|entry| {
+            entry
+                .metadata()
+                .ok()
+                .filter(|metadata| metadata.len() == 0)
+                .map(|_| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    if !empty.is_empty() {
+        bail!("闪卡纹理导出不完整（零字节）: {}", empty.join(", "));
+    }
+    Ok(())
 }
 
 fn collect_files(root: &Path) -> Vec<PathBuf> {
@@ -964,5 +986,15 @@ map m_Colors
         assert_eq!(presentation_card_id(101141101), 10114111);
         assert_eq!(presentation_card_id(102441102), 10244110);
         assert_eq!(presentation_card_id(102441103), 10244111);
+    }
+
+    #[test]
+    fn rejects_empty_exported_textures() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("valid.png"), b"png").unwrap();
+        assert!(validate_exported_textures(dir.path()).is_ok());
+
+        fs::write(dir.path().join("empty.png"), []).unwrap();
+        assert!(validate_exported_textures(dir.path()).is_err());
     }
 }
