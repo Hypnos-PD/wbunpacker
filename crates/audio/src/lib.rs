@@ -428,7 +428,8 @@ pub fn extract_all(
                 }
             };
 
-            let event_name = event_map.get(wem_id);
+            // 同一条 wem 可能对应多条事件（共享录音），取其中一个命名即可
+            let event_name = event_map.get(wem_id).and_then(|names| names.iter().next());
 
             // 按语言分目录: eng/ jpn/ 或无前缀（背景音效等）
             let lang_dir = if let Some(lang) = detect_lang(pck_path) {
@@ -555,7 +556,15 @@ mod tests {
     }
 
     /// 写入一条 20 字节 WEM 条目（id, flag1, size, offset, flag2）。
-    fn put_entry(data: &mut [u8], at: usize, wem_id: u32, flag1: u32, size: u32, offset: u32, flag2: u32) {
+    fn put_entry(
+        data: &mut [u8],
+        at: usize,
+        wem_id: u32,
+        flag1: u32,
+        size: u32,
+        offset: u32,
+        flag2: u32,
+    ) {
         data[at..at + 4].copy_from_slice(&wem_id.to_le_bytes());
         data[at + 4..at + 8].copy_from_slice(&flag1.to_le_bytes());
         data[at + 8..at + 12].copy_from_slice(&size.to_le_bytes());

@@ -523,6 +523,12 @@ pub fn extract_card_voices(
     let json = serde_json::to_string_pretty(&voice_index)?;
     std::fs::write(&index_path, json)?;
     println!("\nvoice_index.json → {}", index_path.display());
+    // 事件名清单：主数据里有些事件名从未在音频工程里建过事件，
+    // 下游（WBArts 的语音缺口报告）据此判断声明是否真实存在。
+    let event_names: std::collections::BTreeSet<&String> = event_table.values().collect();
+    let events_path = output_dir.join("wwise_events.json");
+    std::fs::write(&events_path, serde_json::to_string_pretty(&event_names)?)?;
+    println!("wwise_events.json → {}", events_path.display());
     println!(
         "总计: {} 张卡, {} 个 MP3 (跳过: {})",
         stats.cards_processed, stats.files_output, stats.files_skipped
@@ -552,7 +558,7 @@ fn process_card_pck(
     event_table: &BTreeMap<u32, String>,
     force: bool,
 ) -> anyhow::Result<(BTreeMap<String, String>, usize)> {
-    use crate::wwise::{collect_hirc_mappings, extract_banks_from_pck};
+    use crate::wwise::{HircMappings, extract_banks_from_pck};
 
     let card_out = output_root.join(lang).join(prefix);
     std::fs::create_dir_all(&card_out)?;
@@ -564,52 +570,38 @@ fn process_card_pck(
     }
 
     // 解析 HIRC：wem_id → event_name
-    let mut wem_to_sound = BTreeMap::new();
-    let mut sound_to_action = BTreeMap::new();
-    let mut action_to_event = BTreeMap::new();
+    let mut mappings = HircMappings::new();
 
     let banks = extract_banks_from_pck(&pck_data);
     for bank in &banks {
-        collect_hirc_mappings(
-            bank,
-            &mut wem_to_sound,
-            &mut sound_to_action,
-            &mut action_to_event,
-        );
+        mappings.collect(bank);
     }
 
-    let mut wem_to_name: BTreeMap<u32, String> = BTreeMap::new();
-    for (wem_id, sound_id) in &wem_to_sound {
-        if let Some(action_id) = sound_to_action.get(sound_id)
-            && let Some(event_id) = action_to_event.get(action_id)
-            && let Some(name) = event_table.get(event_id)
-        {
-            wem_to_name.insert(*wem_id, name.clone());
-        }
-    }
+    // wem → 事件名集合：同一条录音会被同一角色的多个事件共用
+    let wem_to_names = mappings.resolve_names(event_table);
 
     // 反转：event_name → [wem_id]
     let mut name_to_wems: HashMap<String, Vec<u32>> = HashMap::new();
-    for (wem_id, name) in &wem_to_name {
-        name_to_wems.entry(name.clone()).or_default().push(*wem_id);
-    }
-
-    // 构建：wem_id → slot（可能有多个 slot 指向同一 wem）
-    let mut wem_to_slot: HashMap<u32, String> = HashMap::new();
-    for (slot, events) in slots {
-        for evt in events {
-            if let Some(wem_ids) = name_to_wems.get(evt) {
-                for &wid in wem_ids {
-                    wem_to_slot.entry(wid).or_insert_with(|| slot.clone());
-                }
-            }
+    for (wem_id, names) in &wem_to_names {
+        for name in names {
+            name_to_wems.entry(name.clone()).or_default().push(*wem_id);
         }
     }
 
-    // 反转：slot → [wem_id]（一个 slot 可能匹配多个 WEM，取第一个匹配的）
+    // 构建：slot → [wem_id]。多个 slot 可以指向同一个 wem（共享录音），
+    // 每个 slot 也允许有备选 wem。
     let mut slot_to_wems: HashMap<String, Vec<u32>> = HashMap::new();
-    for (wem_id, slot) in &wem_to_slot {
-        slot_to_wems.entry(slot.clone()).or_default().push(*wem_id);
+    for (slot, events) in slots {
+        let target = slot_to_wems.entry(slot.clone()).or_default();
+        for evt in events {
+            if let Some(wem_ids) = name_to_wems.get(evt) {
+                for &wid in wem_ids {
+                    if !target.contains(&wid) {
+                        target.push(wid);
+                    }
+                }
+            }
+        }
     }
 
     // 提取并转码：每个 slot 对应一个 MP3 文件
@@ -626,56 +618,50 @@ fn process_card_pck(
             continue;
         }
 
-        // 取第一个匹配的 wem_id
-        let wem_id = match wem_ids.first() {
-            Some(&id) => id,
-            None => continue,
-        };
-
-        // 获取事件名（用于查找已有 WAV）
-        let event_name = wem_to_name.get(&wem_id);
-
-        // 1) 尝试复用 wbu audio 已提取的 WAV
-        let wav_source = event_name.and_then(|name| {
-            let wav_path = audio_wav_dir.join(lang).join(format!("{}.wav", name));
-            if wav_path.exists() {
-                Some(wav_path)
-            } else {
-                None
-            }
-        });
-
-        // 2) 回退：从 pck 提取 WEM → 临时 WAV
-        let need_tmp = wav_source.is_none();
-        let tmp_wav = if need_tmp {
-            if let Some(&offset) = wem_offsets.get(&wem_id) {
-                if let Some(wem_bytes) = extract_wem(&pck_data, offset) {
-                    let tmp = card_out.join(format!("_tmp_{}.wav", wem_id));
-                    match wem_to_wav(wem_bytes, &tmp, vgmstream_path) {
-                        Ok(()) => Some(tmp),
-                        Err(_) => None,
+        // 依次尝试该槽位可用的 wem，第一个成功产出的即用
+        for &wem_id in wem_ids {
+            // 1) 尝试复用 wbu audio 已提取的 WAV（同一 wem 可能对应多个事件名，
+            //    任意一个有 WAV 都能复用）
+            let wav_source = wem_to_names.get(&wem_id).and_then(|names| {
+                names.iter().find_map(|name| {
+                    let wav_path = audio_wav_dir.join(lang).join(format!("{}.wav", name));
+                    if wav_path.exists() {
+                        Some(wav_path)
+                    } else {
+                        None
                     }
-                } else {
-                    None
-                }
+                })
+            });
+
+            // 2) 回退：从 pck 提取 WEM → 临时 WAV
+            let tmp_wav = if wav_source.is_none() {
+                wem_offsets.get(&wem_id).and_then(|&offset| {
+                    extract_wem(&pck_data, offset).and_then(|wem_bytes| {
+                        let tmp = card_out.join(format!("_tmp_{}.wav", wem_id));
+                        wem_to_wav(wem_bytes, &tmp, vgmstream_path)
+                            .ok()
+                            .map(|_| tmp)
+                    })
+                })
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
-        // 3) WAV → MP3
-        let source_wav = wav_source.as_ref().or(tmp_wav.as_ref());
-        if let Some(wav_path) = source_wav {
-            if wav_to_mp3(wav_path, &mp3_path, ffmpeg_path).is_ok() {
-                if let Some(ref tmp) = tmp_wav {
-                    let _ = std::fs::remove_file(tmp);
-                }
+            // 3) WAV → MP3
+            let source_wav = wav_source.as_ref().or(tmp_wav.as_ref());
+            let mut produced = false;
+            if let Some(wav_path) = source_wav
+                && wav_to_mp3(wav_path, &mp3_path, ffmpeg_path).is_ok()
+            {
                 result.insert(slot.clone(), format!("{}/{}/{}.mp3", lang, prefix, slot));
+                produced = true;
             }
-        } else if need_tmp {
-            let _ = std::fs::remove_file(card_out.join(format!("_tmp_{}.wav", wem_id)));
+            if let Some(ref tmp) = tmp_wav {
+                let _ = std::fs::remove_file(tmp);
+            }
+            if produced {
+                break;
+            }
         }
     }
 

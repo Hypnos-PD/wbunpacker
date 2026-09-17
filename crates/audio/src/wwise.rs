@@ -27,7 +27,7 @@
 //! ```
 
 use anyhow::Context;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aes::cipher::{BlockDecryptMut, KeyIvInit};
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
@@ -383,43 +383,27 @@ fn find_chunk(data: &[u8], id: u32) -> Option<usize> {
 pub fn build_global_wem_mapping(
     mapping_data: &[u8],
     pck_data_list: &[(&std::path::Path, &[u8])],
-) -> anyhow::Result<BTreeMap<u32, String>> {
+) -> anyhow::Result<BTreeMap<u32, BTreeSet<String>>> {
     let event_table = decrypt_wwise_event_table(mapping_data)?;
 
     // 全局收集
-    let mut wem_to_sound: BTreeMap<u32, u32> = BTreeMap::new();
-    let mut sound_to_action: BTreeMap<u32, u32> = BTreeMap::new();
-    let mut action_to_event: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut mappings = HircMappings::new();
 
     for (_pck_path, pck_data) in pck_data_list {
         let banks = extract_banks_from_pck(pck_data);
         for bank in &banks {
-            collect_hirc_mappings(
-                bank,
-                &mut wem_to_sound,
-                &mut sound_to_action,
-                &mut action_to_event,
-            );
+            mappings.collect(bank);
         }
     }
-    // bank 统计完成
 
     // 全局关联: wem_id → sound_id → action_id → event_id → event_name
-    let mut result = BTreeMap::new();
-    for (wem_id, sound_id) in &wem_to_sound {
-        if let Some(action_id) = sound_to_action.get(sound_id)
-            && let Some(event_id) = action_to_event.get(action_id)
-            && let Some(name) = event_table.get(event_id)
-        {
-            result.insert(*wem_id, name.clone());
-        }
-    }
+    let result = mappings.resolve_names(&event_table);
 
     tracing::info!(
         "全局映射: {} wem→sound, {} sound→action, {} action→event → {} wem→name",
-        wem_to_sound.len(),
-        sound_to_action.len(),
-        action_to_event.len(),
+        mappings.wem_to_sounds.len(),
+        mappings.sound_to_actions.len(),
+        mappings.action_to_events.len(),
         result.len()
     );
 
@@ -441,59 +425,98 @@ pub fn build_global_wem_mapping(
 /// CAkEvent (type 0x04):
 ///   sid      = HIRC ulID
 ///   type_data 以 var(ulActionListSize) 开头，后跟 ulActionID[]（指向 Action 的 sid）
-pub fn collect_hirc_mappings(
-    bank_data: &[u8],
-    wem_to_sound: &mut BTreeMap<u32, u32>,
-    sound_to_action: &mut BTreeMap<u32, u32>,
-    action_to_event: &mut BTreeMap<u32, u32>,
-) {
-    let hirc_off = match find_chunk(bank_data, chunk_id::HIRC) {
-        Some(o) => o,
-        None => return,
-    };
+/// HIRC 的 wem → sound → action → event 映射。
+///
+/// 每一层都是集合：同一条录音会被同一角色的多个事件共用（例如同一角色的不同
+/// 卡牌版本、本体与异画，会让两个事件各自持有 Action/Sound 却指向同一个 wem），
+/// 用一对一映射会把另一条事件名丢掉，表现为「该联动语音缺失」。
+#[derive(Debug, Default, Clone)]
+pub struct HircMappings {
+    pub wem_to_sounds: BTreeMap<u32, BTreeSet<u32>>,
+    pub sound_to_actions: BTreeMap<u32, BTreeSet<u32>>,
+    pub action_to_events: BTreeMap<u32, BTreeSet<u32>>,
+}
 
-    if hirc_off + 12 > bank_data.len() {
-        return;
+impl HircMappings {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    let count = u32::from_le_bytes([
-        bank_data[hirc_off + 8],
-        bank_data[hirc_off + 9],
-        bank_data[hirc_off + 10],
-        bank_data[hirc_off + 11],
-    ]) as usize;
+    /// 解析出 wem_id → 事件名集合（一个 wem 可能对应多条事件）。
+    pub fn resolve_names(
+        &self,
+        event_table: &BTreeMap<u32, String>,
+    ) -> BTreeMap<u32, BTreeSet<String>> {
+        let mut result: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+        for (wem_id, sound_ids) in &self.wem_to_sounds {
+            for sound_id in sound_ids {
+                let Some(action_ids) = self.sound_to_actions.get(sound_id) else {
+                    continue;
+                };
+                for action_id in action_ids {
+                    let Some(event_ids) = self.action_to_events.get(action_id) else {
+                        continue;
+                    };
+                    for event_id in event_ids {
+                        if let Some(name) = event_table.get(event_id) {
+                            result.entry(*wem_id).or_default().insert(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
 
-    let mut pos = hirc_off + 12;
+    /// 收集一个 bank 的 HIRC 映射。
+    pub fn collect(&mut self, bank_data: &[u8]) {
+        let hirc_off = match find_chunk(bank_data, chunk_id::HIRC) {
+            Some(o) => o,
+            None => return,
+        };
 
-    for _ in 0..count {
-        if pos + 9 > bank_data.len() {
-            break;
+        if hirc_off + 12 > bank_data.len() {
+            return;
         }
 
-        let obj_type = bank_data[pos];
-        let dw_section_size = u32::from_le_bytes([
-            bank_data[pos + 1],
-            bank_data[pos + 2],
-            bank_data[pos + 3],
-            bank_data[pos + 4],
+        let count = u32::from_le_bytes([
+            bank_data[hirc_off + 8],
+            bank_data[hirc_off + 9],
+            bank_data[hirc_off + 10],
+            bank_data[hirc_off + 11],
         ]) as usize;
-        let obj_sid = u32::from_le_bytes([
-            bank_data[pos + 5],
-            bank_data[pos + 6],
-            bank_data[pos + 7],
-            bank_data[pos + 8],
-        ]);
 
-        let data_start = pos + 9;
-        let data_len = dw_section_size.saturating_sub(4);
-        let data_end = (data_start + data_len).min(bank_data.len());
+        let mut pos = hirc_off + 12;
 
-        match obj_type {
+        for _ in 0..count {
+            if pos + 9 > bank_data.len() {
+                break;
+            }
+
+            let obj_type = bank_data[pos];
+            let dw_section_size = u32::from_le_bytes([
+                bank_data[pos + 1],
+                bank_data[pos + 2],
+                bank_data[pos + 3],
+                bank_data[pos + 4],
+            ]) as usize;
+            let obj_sid = u32::from_le_bytes([
+                bank_data[pos + 5],
+                bank_data[pos + 6],
+                bank_data[pos + 7],
+                bank_data[pos + 8],
+            ]);
+
+            let data_start = pos + 9;
+            let data_len = dw_section_size.saturating_sub(4);
+            let data_end = (data_start + data_len).min(bank_data.len());
+
+            match obj_type {
             0x02 => {
                 // CAkSound: sourceID(wem_id) 在 +5（跳过 ulPluginID:u32 + StreamType:u8）
                 if data_len >= 9 {
                     let wem_id = read_u32_le(&bank_data[data_start + 5..]);
-                    wem_to_sound.insert(wem_id, obj_sid);
+                    self.wem_to_sounds.entry(wem_id).or_default().insert(obj_sid);
                 }
             }
             0x03 => {
@@ -505,7 +528,10 @@ pub fn collect_hirc_mappings(
                     if action_type == 0x0403 {
                         let sound_sid = read_u32_le(&bank_data[data_start + 2..]);
                         if sound_sid != 0 {
-                            sound_to_action.insert(sound_sid, obj_sid);
+                            self.sound_to_actions
+                                .entry(sound_sid)
+                                .or_default()
+                                .insert(obj_sid);
                         }
                     }
                 }
@@ -522,7 +548,10 @@ pub fn collect_hirc_mappings(
                             let off = list_start + i * 4;
                             if off + 4 <= data_end {
                                 let action_sid = read_u32_le(&bank_data[off..]);
-                                action_to_event.insert(action_sid, obj_sid);
+                                self.action_to_events
+                                    .entry(action_sid)
+                                    .or_default()
+                                    .insert(obj_sid);
                             }
                         }
                     }
@@ -530,7 +559,8 @@ pub fn collect_hirc_mappings(
             _ => {}
         }
 
-        pos = data_end;
+            pos = data_end;
+        }
     }
 }
 // ============================================================================
@@ -540,6 +570,64 @@ pub fn collect_hirc_mappings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 同一条录音被多个事件共用时（不同 Sound/Action 指向同一 wem），
+    /// 两个事件名都要能解析出来——否则会表现为「该语音缺失」。
+    #[test]
+    fn test_hirc_mappings_share_wem_across_events() {
+        let sound = |sid: u32, wem: u32| {
+            let mut data = vec![0u8; 9];
+            data[5..9].copy_from_slice(&wem.to_le_bytes());
+            (0x02u8, sid, data)
+        };
+        let action = |sid: u32, sound_id: u32| {
+            let mut data = vec![0u8; 6];
+            data[0..2].copy_from_slice(&0x0403u16.to_le_bytes());
+            data[2..6].copy_from_slice(&sound_id.to_le_bytes());
+            (0x03u8, sid, data)
+        };
+        let event = |sid: u32, action_id: u32| {
+            let mut data = vec![1u8];
+            data.extend_from_slice(&action_id.to_le_bytes());
+            (0x04u8, sid, data)
+        };
+        let objects = vec![
+            sound(0x1001, 0xAABBCC),
+            sound(0x1002, 0xAABBCC),
+            action(0x2001, 0x1001),
+            action(0x2002, 0x1002),
+            event(0x3001, 0x2001),
+            event(0x3002, 0x2002),
+        ];
+        let mut hirc = Vec::new();
+        for (obj_type, sid, body) in &objects {
+            hirc.push(*obj_type);
+            hirc.extend_from_slice(&((body.len() as u32) + 4).to_le_bytes());
+            hirc.extend_from_slice(&sid.to_le_bytes());
+            hirc.extend_from_slice(body);
+        }
+        let mut bank = Vec::new();
+        bank.extend_from_slice(b"HIRC");
+        bank.extend_from_slice(&(hirc.len() as u32).to_le_bytes());
+        bank.extend_from_slice(&(objects.len() as u32).to_le_bytes());
+        bank.extend_from_slice(&hirc);
+
+        let mut table = BTreeMap::new();
+        table.insert(0x3001u32, "Play_dx_1_9_100".to_string());
+        table.insert(0x3002u32, "Play_dx_1_9_102".to_string());
+
+        let mut mappings = HircMappings::new();
+        mappings.collect(&bank);
+        let names = mappings.resolve_names(&table);
+        let resolved = names.get(&0xAABBCC).expect("共用 wem 应能解析出事件名");
+        assert_eq!(
+            resolved.len(),
+            2,
+            "两条事件共用同一 wem 时都应保留: {resolved:?}"
+        );
+        assert!(resolved.contains("Play_dx_1_9_100"));
+        assert!(resolved.contains("Play_dx_1_9_102"));
+    }
 
     /// 用 Python 验证过的真实数据做回归测试
     #[test]
@@ -625,8 +713,8 @@ mod tests {
         let mapping = build_global_wem_mapping(&mapping_data, &pck_refs).unwrap();
         assert!(!mapping.is_empty(), "完整管线应产出映射");
         println!("完整管线产出 {} 个 wem→event 映射", mapping.len());
-        for (wem_id, name) in mapping.iter().take(3) {
-            println!("  {} → {}", wem_id, name);
+        for (wem_id, names) in mapping.iter().take(3) {
+            println!("  {} → {:?}", wem_id, names);
         }
     }
 }

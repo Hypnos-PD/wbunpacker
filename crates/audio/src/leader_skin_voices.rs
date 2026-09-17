@@ -115,7 +115,7 @@ fn process_detail_pck(
     event_table: &BTreeMap<u32, String>,
     lang_index: &mut BTreeMap<String, BTreeMap<String, Vec<String>>>,
 ) -> anyhow::Result<ProcessResult> {
-    use crate::wwise::{collect_hirc_mappings, extract_banks_from_pck};
+    use crate::wwise::{HircMappings, extract_banks_from_pck};
 
     let pck_data = std::fs::read(pck_path)?;
     let wem_offsets = parse_akpk(&pck_data);
@@ -123,61 +123,49 @@ fn process_detail_pck(
         return Ok(ProcessResult::default());
     }
 
-    let mut wem_to_sound = BTreeMap::new();
-    let mut sound_to_action = BTreeMap::new();
-    let mut action_to_event = BTreeMap::new();
+    let mut mappings = HircMappings::new();
     for bank in extract_banks_from_pck(&pck_data) {
-        collect_hirc_mappings(
-            &bank,
-            &mut wem_to_sound,
-            &mut sound_to_action,
-            &mut action_to_event,
-        );
+        mappings.collect(&bank);
     }
 
-    let mut wem_to_name: BTreeMap<u32, String> = BTreeMap::new();
-    for (wem_id, sound_id) in &wem_to_sound {
-        if let Some(action_id) = sound_to_action.get(sound_id)
-            && let Some(event_id) = action_to_event.get(action_id)
-            && let Some(name) = event_table.get(event_id)
-        {
-            wem_to_name.insert(*wem_id, name.clone());
-        }
-    }
+    // wem → 事件名集合（同一条录音可能被多条事件共用）
+    let wem_to_names = mappings.resolve_names(event_table);
 
     let mut result = ProcessResult::default();
-    for (wem_id, event_name) in wem_to_name {
-        let Some(event) = parse_detail_event(&event_name) else {
-            continue;
-        };
-        let Some(offset) = wem_offsets.get(&wem_id) else {
-            continue;
-        };
-        let rel_path = format!(
-            "{}/{}/{}_{}.mp3",
-            lang, event.id, event.animation, event.option
-        );
-        let mp3_path = output_dir.join(&rel_path);
-        if mp3_path.exists() {
-            insert_voice(lang_index, &event, rel_path);
-            result.skipped += 1;
-            continue;
-        }
-        if let Some(parent) = mp3_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if output_voice_file(
-            &pck_data,
-            *offset,
-            &event_name,
-            audio_wav_dir,
-            lang,
-            &mp3_path,
-            vgmstream_path,
-            ffmpeg_path,
-        )? {
-            insert_voice(lang_index, &event, rel_path);
-            result.output += 1;
+    for (wem_id, names) in &wem_to_names {
+        for event_name in names {
+            let Some(event) = parse_detail_event(event_name) else {
+                continue;
+            };
+            let Some(offset) = wem_offsets.get(wem_id) else {
+                continue;
+            };
+            let rel_path = format!(
+                "{}/{}/{}_{}.mp3",
+                lang, event.id, event.animation, event.option
+            );
+            let mp3_path = output_dir.join(&rel_path);
+            if mp3_path.exists() {
+                insert_voice(lang_index, &event, rel_path);
+                result.skipped += 1;
+                continue;
+            }
+            if let Some(parent) = mp3_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if output_voice_file(
+                &pck_data,
+                *offset,
+                event_name,
+                audio_wav_dir,
+                lang,
+                &mp3_path,
+                vgmstream_path,
+                ffmpeg_path,
+            )? {
+                insert_voice(lang_index, &event, rel_path);
+                result.output += 1;
+            }
         }
     }
     Ok(result)
