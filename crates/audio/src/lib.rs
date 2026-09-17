@@ -88,7 +88,7 @@ pub struct AudioExtractStats {
 /// 2. 读取 header size（偏移 4，u32 LE）
 /// 3. 搜索 BKHD magic
 /// 4. 从 BKHD 向前反向扫描 20 字节 WEM 条目
-/// 5. 验证条目有效性（wem_id > 0x100000, flag1/flag2 == 1, offset 在合法范围内）
+/// 5. 验证条目有效性（wem_id != 0, flag1/flag2 == 1, offset 在合法范围内）
 pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
     if data.len() < 8 || &data[..4] != AKPK_MAGIC {
         return parse_didx_data(data);
@@ -104,7 +104,8 @@ pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
 
     let bkhd_pos = match bkhd_pos {
         Some(p) => p,
-        None => return HashMap::new(),
+        // 没有 BKHD 的容器（索引在 bank 的 DIDX chunk 里）走 DIDX 解析。
+        None => return parse_didx_data(data),
     };
 
     // 从 BKHD 向前跳过零值填充
@@ -144,7 +145,10 @@ pub fn parse_akpk(data: &[u8]) -> HashMap<u32, u32> {
             data[pos + 19],
         ]);
 
-        if wem_id > 0x100000
+        // Wwise 短 ID 可以小于 0x100000：日文卡包里紧跟在 bank 后面的第一条媒体
+        // 就是这种小 ID（例如 dx_10114120.pck 的 destroy）。旧实现要求
+        // wem_id > 0x100000，会把这条当成无效条目并结束扫描，导致该语音静默丢失。
+        if wem_id != 0
             && flag1 == 1
             && offset as usize > hdr_size
             && (offset as usize) < file_size
@@ -548,5 +552,43 @@ mod tests {
 
         let entries = parse_akpk(&data);
         assert_eq!(entries.get(&123456), Some(&36));
+    }
+
+    /// 写入一条 20 字节 WEM 条目（id, flag1, size, offset, flag2）。
+    fn put_entry(data: &mut [u8], at: usize, wem_id: u32, flag1: u32, size: u32, offset: u32, flag2: u32) {
+        data[at..at + 4].copy_from_slice(&wem_id.to_le_bytes());
+        data[at + 4..at + 8].copy_from_slice(&flag1.to_le_bytes());
+        data[at + 8..at + 12].copy_from_slice(&size.to_le_bytes());
+        data[at + 12..at + 16].copy_from_slice(&offset.to_le_bytes());
+        data[at + 16..at + 20].copy_from_slice(&flag2.to_le_bytes());
+    }
+
+    /// 构造一个最小 AKPK：header size 0xa0，条目从 0x54 起，BKHD 在 hdr+8。
+    fn build_akpk_header(hdr_size: usize) -> Vec<u8> {
+        let mut data = vec![0u8; hdr_size + 8 + 4096];
+        data[0..4].copy_from_slice(b"AKPK");
+        data[4..8].copy_from_slice(&(hdr_size as u32).to_le_bytes());
+        // 最后一条条目的 flag2 落在 hdr_size 处，之后 4 字节为 0，BKHD 紧随其后
+        data[hdr_size + 8..hdr_size + 12].copy_from_slice(b"BKHD");
+        data
+    }
+
+    /// 小于 0x100000 的 wem_id 是合法条目，不能被当成列表结尾。
+    #[test]
+    fn test_parse_akpk_accepts_small_wem_ids() {
+        let hdr_size = 0xa0;
+        let mut data = build_akpk_header(hdr_size);
+        // 账本记录：flag1 != 1 → 扫描应停在它上面
+        put_entry(&mut data, 0x54, 1, 932, 216, 1, 5);
+        // 小 ID 媒体条目（真实案例：jpn dx_10114120.pck 的 destroy）
+        put_entry(&mut data, 0x68, 666392, 1, 16760, 0x180, 1);
+        put_entry(&mut data, 0x7c, 107399994, 1, 64030, 0x200, 1);
+        put_entry(&mut data, 0x90, 510068451, 1, 22626, 0x280, 1);
+
+        let entries = parse_akpk(&data);
+        assert_eq!(entries.get(&666392), Some(&0x180));
+        assert_eq!(entries.get(&107399994), Some(&0x200));
+        assert_eq!(entries.get(&510068451), Some(&0x280));
+        assert_eq!(entries.len(), 3, "账本记录不应被当成媒体条目");
     }
 }
