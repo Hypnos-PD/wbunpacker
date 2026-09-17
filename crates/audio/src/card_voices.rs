@@ -215,8 +215,48 @@ fn slot_labels() -> BTreeMap<&'static str, SlotLabel> {
     );
     m.insert("evolve", lbl("进化", "Evolve", "進化", "진화", "進化"));
     m.insert(
+        "evolve_mode1",
+        lbl(
+            "进化·模式1",
+            "Evolve·Mode 1",
+            "進化·モード1",
+            "진화·모드1",
+            "進化·模式1",
+        ),
+    );
+    m.insert(
+        "evolve_mode2",
+        lbl(
+            "进化·模式2",
+            "Evolve·Mode 2",
+            "進化·モード2",
+            "진화·모드2",
+            "進化·模式2",
+        ),
+    );
+    m.insert(
         "super_evolve",
         lbl("超进化", "Super Evolve", "超進化", "초진화", "超進化"),
+    );
+    m.insert(
+        "super_evolve_mode1",
+        lbl(
+            "超进化·模式1",
+            "Super Evolve·Mode 1",
+            "超進化·モード1",
+            "초진화·모드1",
+            "超進化·模式1",
+        ),
+    );
+    m.insert(
+        "super_evolve_mode2",
+        lbl(
+            "超进化·模式2",
+            "Super Evolve·Mode 2",
+            "超進化·モード2",
+            "초진화·모드2",
+            "超進化·模式2",
+        ),
     );
     m.insert("destroy", lbl("破坏", "Destroy", "破壊", "파괴", "破壞"));
     m.insert(
@@ -369,11 +409,10 @@ pub fn build_voice_map(
                 }
                 "evolve" => {
                     for evt in &events {
-                        let slot = if evt.contains("_sp") {
-                            "super_evolve".to_string()
-                        } else {
-                            "evolve".to_string()
-                        };
+                        let suffix = evt
+                            .strip_prefix(&format!("Play_dx_{}_", prefix))
+                            .unwrap_or(evt);
+                        let slot = classify_evolve_suffix(suffix);
                         slots.entry(slot).or_default().push(evt.clone());
                     }
                 }
@@ -728,6 +767,22 @@ fn classify_act_suffix(suffix: &str) -> String {
     "act".to_string()
 }
 
+/// 分类 Evolve / SuperEvolve 事件的后缀 → slot 名。
+///
+/// 后缀形如 `3` / `3_sp` / `3_mode1` / `3_sp_mode1`：带 `_moden` 的按模式拆成
+/// 独立槽位（进化·模式1 这类卡的进化/超进化各有两个模式语音，坍缩成一个槽位
+/// 只会导出第一条，模式2 会整个丢掉）。
+fn classify_evolve_suffix(suffix: &str) -> String {
+    let (base, rest) = match suffix.strip_prefix("3_sp") {
+        Some(rest) => ("super_evolve", rest),
+        None => ("evolve", suffix.strip_prefix('3').unwrap_or(suffix)),
+    };
+    match rest.strip_prefix("_mode") {
+        Some(mode) => format!("{base}_mode{mode}"),
+        None => base.to_string(),
+    }
+}
+
 // ============================================================================
 // Slot 排序与标签
 // ============================================================================
@@ -844,6 +899,45 @@ mod tests {
             slots.get("super_evolve"),
             Some(&vec!["Play_dx_10001110_3_sp".to_string()])
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn evolve_modes_keep_separate_slots() -> anyhow::Result<()> {
+        // 出发的憧憬·苇剑&武津御 这类卡：进化/超进化各有模式1、模式2 两条语音，
+        // 坍缩成一个槽位会丢掉模式2。
+        let mut row = vec![json!(""); 53];
+        row[38] = json!("dx_10854110");
+        row[43] = json!(
+            "Play_dx_10854110_3_mode1,Play_dx_10854110_3_mode2,Play_dx_10854110_3_sp_mode1,Play_dx_10854110_3_sp_mode2"
+        );
+
+        let temp_dir = tempfile::tempdir()?;
+        let table_path = temp_dir.path().join("CardResourceMaster.json");
+        std::fs::write(&table_path, serde_json::to_vec(&vec![row])?)?;
+
+        let voice_map = build_voice_map(&table_path)?;
+        let slots = voice_map.get("10854110").context("voice map")?;
+
+        assert_eq!(
+            slots.get("evolve_mode1"),
+            Some(&vec!["Play_dx_10854110_3_mode1".to_string()])
+        );
+        assert_eq!(
+            slots.get("evolve_mode2"),
+            Some(&vec!["Play_dx_10854110_3_mode2".to_string()])
+        );
+        assert_eq!(
+            slots.get("super_evolve_mode1"),
+            Some(&vec!["Play_dx_10854110_3_sp_mode1".to_string()])
+        );
+        assert_eq!(
+            slots.get("super_evolve_mode2"),
+            Some(&vec!["Play_dx_10854110_3_sp_mode2".to_string()])
+        );
+        assert!(!slots.contains_key("evolve"));
+        assert!(!slots.contains_key("super_evolve"));
 
         Ok(())
     }

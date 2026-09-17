@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Card voices** — Evolve/SuperEvolve voices with a mode suffix (`Play_dx_<prefix>_3_mode1`, `..._3_sp_mode2`, …) now export as separate slots (`evolve_mode1` / `evolve_mode2` / `super_evolve_mode1` / `super_evolve_mode2`) instead of collapsing into a single `evolve` / `super_evolve` slot that only kept the first recording. Affects cards like 出发的憧憬·苇剑&武津御 whose mode 2 lines were missing.
+
 ## [0.1.1] - 2026-08-12
 
 ### Added
