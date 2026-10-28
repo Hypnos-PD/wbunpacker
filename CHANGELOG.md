@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **LeaderSkin previews** — `wbu texture leader-skin-previews` extracts the transparent `UI/ClassChar/utx_pict_leader_<id>_00` portraits used by the game's leader-skin selection UI. Extraction is SHA-256 incremental and outputs `exports/leader-skin-previews/<id>.png`.
+
 ### Fixed
 
 - **Card voices** — Evolve/SuperEvolve voices with a mode suffix (`Play_dx_<prefix>_3_mode1`, `..._3_sp_mode2`, …) now export as separate slots (`evolve_mode1` / `evolve_mode2` / `super_evolve_mode1` / `super_evolve_mode2`) instead of collapsing into a single `evolve` / `super_evolve` slot that only kept the first recording. Affects cards like 出发的憧憬·苇剑&武津御 whose mode 2 lines were missing.

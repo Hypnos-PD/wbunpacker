@@ -149,6 +149,7 @@ wbu texture emblems                  # 提取徽章贴图
 wbu texture stamps                   # 提取印章贴图
 wbu texture sleeves                  # 提取卡背贴图（764×1024，跳过 premium）
 wbu texture home-illust-picts        # 提取主界面插图静态图
+wbu texture leader-skin-previews     # 提取无背景主战者皮肤立绘
 wbu texture all -o <目录>             # 提取全部 Texture2D 到指定目录（保留相对路径）
 wbu texture all -o <目录> -v all      # 全部语言变体
 wbu foil -o <目录>                     # 导出普通卡闪卡材质（排除 7 开头珍藏卡）

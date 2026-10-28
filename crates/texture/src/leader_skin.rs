@@ -20,6 +20,13 @@ pub struct LeaderSkinStats {
     pub metadata_updated: usize,
 }
 
+#[derive(Debug, Default)]
+pub struct LeaderSkinPreviewStats {
+    pub processed: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
 #[derive(Debug, serde::Serialize)]
 struct LeaderSkinConfig {
     config_version: u32,
@@ -136,6 +143,180 @@ pub fn process_leader_skins(
     pb.finish_with_message("LeaderSkin done");
 
     Ok(stats)
+}
+
+/// Extract the transparent ClassChar portraits used by the game's leader-skin
+/// selection UI. These are separate UI AssetBundles, not part of the Spine
+/// prefab bundles handled by `process_leader_skins`.
+pub fn process_leader_skin_previews(
+    data_dir: &Path,
+    asset_studio_path: &Path,
+) -> anyhow::Result<LeaderSkinPreviewStats> {
+    let source_dir = data_dir
+        .join("variants")
+        .join("Chs")
+        .join("decrypted")
+        .join("UI")
+        .join("ClassChar");
+    if !source_dir.exists() {
+        bail!(
+            "ClassChar 目录不存在: {}（请先运行 wbu asset batch -v Chs）",
+            source_dir.display()
+        );
+    }
+
+    let output_dir = data_dir.join("exports").join("leader-skin-previews");
+    fs::create_dir_all(&output_dir)?;
+    let hash_cache_path = output_dir.join(".hashes.json");
+    let hash_cache: BTreeMap<String, String> = fs::read_to_string(&hash_cache_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+
+    let mut bundles = Vec::new();
+    for entry in fs::read_dir(&source_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(id) = leader_preview_id(&name) {
+            bundles.push((id.to_string(), entry.path()));
+        }
+    }
+    bundles.sort_by(|left, right| left.0.cmp(&right.0));
+    if bundles.is_empty() {
+        bail!("UI/ClassChar 中没有 utx_pict_leader_*_00.ab");
+    }
+
+    let mut stale = Vec::new();
+    let mut current_hashes = BTreeMap::new();
+    for (id, bundle) in &bundles {
+        let hash = sha256_file(bundle)?;
+        current_hashes.insert(id.clone(), hash.clone());
+        let output = output_dir.join(format!("{id}.png"));
+        if !output.exists() || hash_cache.get(id) != Some(&hash) {
+            stale.push((id.clone(), bundle.clone()));
+        }
+    }
+
+    let mut stats = LeaderSkinPreviewStats {
+        skipped: bundles.len() - stale.len(),
+        ..LeaderSkinPreviewStats::default()
+    };
+    if stale.is_empty() {
+        fs::write(
+            hash_cache_path,
+            serde_json::to_string_pretty(&current_hashes)?,
+        )?;
+        println!(
+            "LeaderSkin 无背景立绘全部为最新（{} 个），跳过",
+            bundles.len()
+        );
+        return Ok(stats);
+    }
+
+    let temp_input = output_dir.join(".temp_input");
+    let temp_output = output_dir.join(".temp_output");
+    let _ = fs::remove_dir_all(&temp_input);
+    let _ = fs::remove_dir_all(&temp_output);
+    fs::create_dir_all(&temp_input)?;
+    fs::create_dir_all(&temp_output)?;
+    for (_, bundle) in &stale {
+        let name = bundle.file_name().context("invalid ClassChar bundle")?;
+        fs::copy(bundle, temp_input.join(name))?;
+    }
+
+    println!(
+        "需要更新 {} 个主战者无背景立绘（共 {} 个）",
+        stale.len(),
+        bundles.len()
+    );
+    let status = Command::new(asset_studio_path)
+        .arg(&temp_input)
+        .args([
+            "-t",
+            "tex2d",
+            "-g",
+            "fileName",
+            "-f",
+            "assetName",
+            "-o",
+            &temp_output.to_string_lossy(),
+            "--unity-version",
+            UNITY_VERSION,
+            "--log-level",
+            "warning",
+        ])
+        .status()
+        .with_context(|| format!("无法启动 AssetStudio: {}", asset_studio_path.display()))?;
+    if !status.success() {
+        bail!("AssetStudio 退出码: {:?}", status.code());
+    }
+
+    for (id, bundle) in &stale {
+        let bundle_name = bundle
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("invalid ClassChar bundle name")?;
+        let export_dir = temp_output.join(format!("{bundle_name}_export"));
+        let expected = format!("utx_pict_leader_{id}_00.png");
+        let png = find_png_by_name(&export_dir, &expected);
+        match png {
+            Some(path) => {
+                fs::rename(path, output_dir.join(format!("{id}.png")))?;
+                stats.processed += 1;
+            }
+            None => {
+                stats.failed += 1;
+                eprintln!("LeaderSkin 预览提取失败 {id}: missing {expected}");
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(&temp_input);
+    let _ = fs::remove_dir_all(&temp_output);
+    fs::write(
+        hash_cache_path,
+        serde_json::to_string_pretty(&current_hashes)?,
+    )?;
+    Ok(stats)
+}
+
+fn leader_preview_id(name: &str) -> Option<&str> {
+    name.strip_prefix("utx_pict_leader_")?
+        .strip_suffix("_00.ab")
+        .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn find_png_by_name(dir: &Path, wanted: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_png_by_name(&path, wanted) {
+                return Some(found);
+            }
+        } else if path.file_name().and_then(|name| name.to_str()) == Some(wanted) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::leader_preview_id;
+
+    #[test]
+    fn recognizes_only_classchar_leader_preview_bundles() {
+        assert_eq!(
+            leader_preview_id("utx_pict_leader_1001_00.ab"),
+            Some("1001")
+        );
+        assert_eq!(
+            leader_preview_id("utx_pict_leader_9011_00.ab"),
+            Some("9011")
+        );
+        assert_eq!(leader_preview_id("utx_btn_class_leader_1001.ab"), None);
+        assert_eq!(leader_preview_id("utx_pict_leader_1001_01.ab"), None);
+    }
 }
 
 fn is_leader_skin_bundle(name: &str) -> bool {

@@ -229,6 +229,12 @@ enum TextureCmd {
         #[arg(long)]
         asset_studio: Option<String>,
     },
+    /// 提取主战者皮肤无背景立绘: UI/ClassChar/utx_pict_leader_*.ab -> PNG
+    LeaderSkinPreviews {
+        /// AssetStudio CLI 路径（覆盖配置文件）
+        #[arg(long)]
+        asset_studio: Option<String>,
+    },
     /// 提取徽章纹理: UI/Emblem/utx_tex_em_*.ab -> PNG
     Emblems {
         /// AssetStudio CLI 路径（覆盖配置文件）
@@ -1832,6 +1838,19 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let data_dir = std::path::Path::new(&cfg.data_dir);
                 texture::process_home_illust_picts(data_dir, &as_path)?;
+            }
+            TextureCmd::LeaderSkinPreviews { asset_studio } => {
+                let cfg = config::load()?;
+                let as_path = match &asset_studio {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => std::path::PathBuf::from(&cfg.asset_studio_path),
+                };
+                let data_dir = std::path::Path::new(&cfg.data_dir);
+                let stats = texture::leader_skin::process_leader_skin_previews(data_dir, &as_path)?;
+                println!(
+                    "LeaderSkin 无背景立绘提取完成: 更新 {} | 跳过: {} | 失败: {}",
+                    stats.processed, stats.skipped, stats.failed
+                );
             }
             TextureCmd::Emblems { asset_studio } => {
                 let cfg = config::load()?;
