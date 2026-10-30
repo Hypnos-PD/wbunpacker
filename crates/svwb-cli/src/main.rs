@@ -437,11 +437,12 @@ fn detect_profile(
                 il2cpp_dumper_dir,
                 refresh_dump,
             })?;
+            let mut raw = result.raw.clone();
             let profile = if let Some(profile) = &result.profile {
                 profile.clone()
             } else {
                 if let Some(raw_output) = raw_output {
-                    let body = serde_json::to_string_pretty(&result.raw)? + "\n";
+                    let body = serde_json::to_string_pretty(&raw)? + "\n";
                     write_new_file(raw_output, body.as_bytes())?;
                 }
                 let token_file = token_file.ok_or_else(|| {
@@ -460,9 +461,20 @@ fn detect_profile(
                     .resource_version
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("runtime probe returned no resource_version"))?;
-                complete_native_detection(&result, resource_version)?
+                let profile = complete_native_detection(&result, resource_version)?;
+                raw["profile_complete"] = serde_json::json!(true);
+                raw["resource_version"] = serde_json::json!(profile.runtime.resource_version);
+                if let Some(manifest) = &profile.manifest_source {
+                    raw["manifest_variant"] = serde_json::json!(manifest.variant);
+                    raw["manifest_url"] = serde_json::json!(manifest.url);
+                    raw["manifest"] = serde_json::json!({
+                        "sha256": manifest.sha256,
+                        "size": manifest.size,
+                    });
+                }
+                profile
             };
-            (profile, Some(result.raw))
+            (profile, Some(raw))
         }
     };
     let body = serde_json::to_string_pretty(&profile)? + "\n";
