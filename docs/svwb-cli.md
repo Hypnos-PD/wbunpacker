@@ -9,7 +9,7 @@ svwb profile inspect <file>
 svwb profile id <file>
 svwb profile probe <file> --token-file <path> [--api-base URL] [--output FILE] [--json]
 svwb profile import-dumper <runtime.json> --output <profile.json>
-svwb profile detect --output <profile.json> [--engine python|native] [--memory-dump DIR] [--dumper PATH] [--game-root PATH] [--pid PID]
+svwb profile detect --output <profile.json> [--memory-dump DIR] [--game-root PATH] [--pid PID]
 svwb profile publish <file> --token-file <path>
 svwb profile list --operator <cygames|cy|netease|ne> --token-file <path>
 svwb profile active --operator <cygames|cy|netease|ne> --token-file <path>
@@ -23,7 +23,8 @@ svwb probe validate <file> [--json]
 检查：
 
 - `WBU_CONFIG` 或 `config/Config.local.toml`。
-- `python3`。
+- `dotnet`。
+- `Il2CppDumper.dll`。
 - `ffmpeg`。
 - `vgmstream-cli`。
 - `AssetStudioModCLI`。
@@ -45,8 +46,7 @@ svwb probe validate <file> [--json]
 
 `profile detect` 当前仅支持 `operator=cygames`。
 
-- 默认引擎为 `native`：Rust 进程发现、内存 dump、元数据提取和 CommonHeader 定位，调用 `dotnet` 运行本地 `Il2CppDumper.dll`。
-- `--engine python` 保留为显式兼容选项，并强制 `--dry-run`。
+- 使用 Rust 进程发现、内存 dump、元数据提取和 CommonHeader 定位，调用 `dotnet` 运行本地 `Il2CppDumper.dll`。
 
 原生模式需要 Linux、`GameAssembly.dll` 和 `Il2CppDumper.dll`。默认 `Il2CppDumper` 目录为 `~/.local/share/svwb_dumper/Il2CppDumper`。
 

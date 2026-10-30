@@ -7,7 +7,6 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use url::Url;
 
 pub mod credential;
-pub mod detect;
 pub mod doctor;
 pub mod native_detect;
 pub mod probe;

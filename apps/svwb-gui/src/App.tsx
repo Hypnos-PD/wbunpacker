@@ -59,8 +59,6 @@ export default function App() {
     "contracts/examples/runtime-profile.cygames.json"
   );
   const [profile, setProfile] = useState<ValidationReport | null>(null);
-  const [dumperPath, setDumperPath] = useState("");
-  const [detectEngine, setDetectEngine] = useState("native");
   const [gameRoot, setGameRoot] = useState("");
   const [dotnetPath, setDotnetPath] = useState("dotnet");
   const [il2cppDumperDir, setIl2cppDumperDir] = useState("");
@@ -137,24 +135,6 @@ export default function App() {
       <section className="panel">
         <h2>Profile</h2>
         <div className="row">
-          <label>
-            引擎
-            <select
-              value={detectEngine}
-              onChange={(event) => setDetectEngine(event.target.value)}
-            >
-              <option value="python">Python adapter</option>
-              <option value="native">Rust native</option>
-            </select>
-          </label>
-          <label className="grow">
-            Dumper 脚本
-            <input
-              value={dumperPath}
-              onChange={(event) => setDumperPath(event.target.value)}
-              placeholder="留空使用 SVWB_DUMPER 或相邻仓库"
-            />
-          </label>
           <label className="grow">
             游戏目录
             <input
@@ -164,31 +144,26 @@ export default function App() {
             />
           </label>
         </div>
-        {detectEngine === "native" && (
-          <div className="row">
-            <label className="grow">
-              dotnet
-              <input value={dotnetPath} onChange={(event) => setDotnetPath(event.target.value)} />
-            </label>
-            <label className="grow">
-              Il2CppDumper 目录
-              <input
-                value={il2cppDumperDir}
-                onChange={(event) => setIl2cppDumperDir(event.target.value)}
-                placeholder="留空使用默认目录"
-              />
-            </label>
-          </div>
-        )}
+        <div className="row">
+          <label className="grow">
+            dotnet
+            <input value={dotnetPath} onChange={(event) => setDotnetPath(event.target.value)} />
+          </label>
+          <label className="grow">
+            Il2CppDumper 目录
+            <input
+              value={il2cppDumperDir}
+              onChange={(event) => setIl2cppDumperDir(event.target.value)}
+              placeholder="留空使用默认目录"
+            />
+          </label>
+        </div>
         <div className="row">
           <button
             disabled={busy}
             onClick={() =>
               run(async () => {
                 const result = await invoke<DetectionResult>("detect_profile", {
-                  engine: detectEngine,
-                  dumper: dumperPath || null,
-                  python: "python3",
                   gameRoot: gameRoot || null,
                   dataRoot: null,
                   variant: "Cht",

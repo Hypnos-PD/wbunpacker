@@ -1,15 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::{path::PathBuf, str::FromStr};
 
 use serde::Serialize;
 use svwb_core::{
     Operator, RuntimeProbe, RuntimeProfile,
     credential::{CredentialSummary, inspect_cygames_systemd, inspect_netease_auth},
-    detect::{PythonDumperOptions, default_python_dumper, detect_with_python_dumper},
     doctor::{DoctorReport, run as run_doctor},
     native_detect::{NativeDetectorOptions, complete_native_detection, detect_with_native},
     probe::{
@@ -101,10 +97,8 @@ async fn activate_profile(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn detect_profile(
-    engine: String,
-    dumper: Option<String>,
-    python: String,
     game_root: Option<String>,
     data_root: Option<String>,
     variant: String,
@@ -116,66 +110,43 @@ async fn detect_profile(
     output: String,
 ) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let profile = match engine.as_str() {
-            "python" => {
-                let script = dumper
-                    .map(PathBuf::from)
-                    .or_else(default_python_dumper)
-                    .ok_or_else(|| "dumper script not found".to_string())?;
-                detect_with_python_dumper(&PythonDumperOptions {
-                    python: PathBuf::from(python),
-                    script,
-                    game_root: game_root.map(PathBuf::from),
-                    data_root: data_root.map(PathBuf::from),
-                    variant,
-                    pid,
-                })
-                .map_err(|error| error.to_string())?
-            }
-            "native" => {
-                let home = std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .ok_or_else(|| "HOME is not set".to_string())?;
-                let detection = detect_with_native(&NativeDetectorOptions {
-                    game_root: game_root.map(PathBuf::from).unwrap_or_else(|| {
-                        home.join(".local/share/Steam/steamapps/common/ShadowverseWB")
-                    }),
-                    data_root: data_root
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| home.join("Data/svwb_dumper")),
-                    process_name: "ShadowverseWB.exe".into(),
-                    pid,
-                    memory_dump: None,
-                    variant,
-                    min_region_bytes: 4 * 1024,
-                    max_region_bytes: 256 * 1024 * 1024,
-                    dotnet: PathBuf::from(dotnet),
-                    il2cpp_dumper_dir: il2cpp_dumper_dir
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| home.join(".local/share/svwb_dumper/Il2CppDumper")),
-                    refresh_dump: false,
-                })
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| "HOME is not set".to_string())?;
+        let detection = detect_with_native(&NativeDetectorOptions {
+            game_root: game_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".local/share/Steam/steamapps/common/ShadowverseWB")),
+            data_root: data_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("Data/svwb_dumper")),
+            process_name: "ShadowverseWB.exe".into(),
+            pid,
+            memory_dump: None,
+            variant,
+            min_region_bytes: 4 * 1024,
+            max_region_bytes: 256 * 1024 * 1024,
+            dotnet: PathBuf::from(dotnet),
+            il2cpp_dumper_dir: il2cpp_dumper_dir
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".local/share/svwb_dumper/Il2CppDumper")),
+            refresh_dump: false,
+        })
+        .map_err(|error| error.to_string())?;
+        let profile = if let Some(profile) = detection.profile {
+            profile
+        } else {
+            let token_file = token_file
+                .ok_or_else(|| "manifest URL and JWT file are unavailable".to_string())?;
+            let token_path = PathBuf::from(token_file);
+            let probe = probe_cygames_draft_via_wbarts(&detection.draft, &api_base, &token_path)
                 .map_err(|error| error.to_string())?;
-                if let Some(profile) = detection.profile {
-                    profile
-                } else {
-                    let token_file = token_file
-                        .ok_or_else(|| "manifest URL and JWT file are unavailable".to_string())?;
-                    let probe = probe_cygames_draft_via_wbarts(
-                        &detection.draft,
-                        &api_base,
-                        Path::new(&token_file),
-                    )
-                    .map_err(|error| error.to_string())?;
-                    let resource_version = probe
-                        .resource_version
-                        .as_deref()
-                        .ok_or_else(|| "probe returned no resource_version".to_string())?;
-                    complete_native_detection(&detection, resource_version)
-                        .map_err(|error| error.to_string())?
-                }
-            }
-            _ => return Err("unknown detect engine".into()),
+            let resource_version = probe
+                .resource_version
+                .as_deref()
+                .ok_or_else(|| "probe returned no resource_version".to_string())?;
+            complete_native_detection(&detection, resource_version)
+                .map_err(|error| error.to_string())?
         };
         let path = PathBuf::from(&output);
         if let Some(parent) = path.parent() {

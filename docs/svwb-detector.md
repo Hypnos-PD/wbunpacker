@@ -1,46 +1,6 @@
 # Profile Detector
 
-## 当前实现
-
-`svwb profile detect` 调用：
-
-```text
-python3 <dumper>/scripts/sync_runtime.py --dry-run --json-out <temp>
-```
-
-适配器输入：
-
-- 游戏安装目录。
-- 数据缓存目录。
-- 游戏进程 PID。
-- manifest 语言变体。
-
-适配器输出：
-
-- 原始 `runtime.json`。
-- 转换后的 RuntimeProfile。
-
-命令不传递 `--write-wbu`、`--apply-server` 或 `--apply-server-ssh`。
-
-## 替换边界
-
-CLI 和 GUI 只依赖 `detect_with_python_dumper` 的输入和 RuntimeProfile 输出。
-
-Rust 原生实现接入时保持以下命令不变：
-
-```text
-svwb profile detect --output <profile.json>
-```
-
-原生实现替换 `PythonDumperOptions` 调用，不改变 RuntimeProfile 契约。
-
-## 原生实现
-
-```text
-svwb profile detect --engine native --output <profile.json>
-```
-
-原生模式执行：
+`svwb profile detect` 执行：
 
 1. `/proc` 进程发现和内存区域读取。
 2. manifest URL 与 `App-Ver` 搜索。
@@ -69,11 +29,11 @@ https://shadowverse-wb.akamaized.net/dl/manifests/Windows/{resource_version}/ass
 
 Jpn 变体使用 `assetbundle.manifest`，不带语言段。`resource_version=00000000` 不会拼接 URL。
 
-原生模式当前只支持 Linux，并已作为 `profile detect` 默认引擎。Python 模式保留为显式兼容选项。
+检测器仅支持 Linux。
 
-## 对照结果
+## 对照基线
 
-使用同一份 `762956809150` 内存 dump 时，Python 与 Rust native 输出一致：
+同一份 `762956809150` 内存 dump 曾用于对照 Python 适配器和 Rust 原生实现。移除 Python 适配器前，两边输出以下字段一致：
 
 - operator
 - resource version
@@ -85,6 +45,4 @@ Jpn 变体使用 `assetbundle.manifest`，不带语言段。`resource_version=00
 - manifest SHA-256
 - profile ID
 
-Python profile ID：`sha256:2a34e15aac7e150f07c7f3922b9c5d07c307f134ea958ede2ee5dd8f69d5b00a`
-
-Rust native profile ID：`sha256:2a34e15aac7e150f07c7f3922b9c5d07c307f134ea958ede2ee5dd8f69d5b00a`
+Profile ID：`sha256:2a34e15aac7e150f07c7f3922b9c5d07c307f134ea958ede2ee5dd8f69d5b00a`

@@ -62,22 +62,13 @@ pub fn run(config: Option<PathBuf>) -> DoctorReport {
         }
     };
 
-    for command in [
-        "python3",
-        "dotnet",
-        "ffmpeg",
-        "vgmstream-cli",
-        "AssetStudioModCLI",
-    ] {
+    for command in ["dotnet", "ffmpeg", "vgmstream-cli", "AssetStudioModCLI"] {
         checks.push(check_command(command, command));
     }
 
     if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
         let dumper = home.join(".local/share/svwb_dumper/Il2CppDumper/Il2CppDumper.dll");
         checks.push(file_check("il2cpp_dumper", &dumper));
-
-        let python_adapter = PathBuf::from("../svwb_dumper/scripts/sync_runtime.py");
-        checks.push(file_check("python_adapter", &python_adapter));
     }
 
     match find_game_process("ShadowverseWB.exe") {

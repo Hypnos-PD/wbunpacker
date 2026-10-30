@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, HashMap},
     fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
@@ -351,7 +352,7 @@ fn find_game_process_platform(name: &str) -> Result<GameProcess> {
             rss_kib: process_memory_size(pid).unwrap_or(0),
         });
     }
-    candidates.sort_by(|left, right| right.rss_kib.cmp(&left.rss_kib));
+    candidates.sort_by_key(|process| Reverse(process.rss_kib));
     candidates.into_iter().next().with_context(|| {
         format!("process {name} is not running; launch the game to the title screen")
     })
@@ -593,7 +594,7 @@ fn discover_manifest_records(dump: &Path) -> Result<Vec<ManifestObservation>> {
             },
         )
         .collect();
-    items.sort_by(|left, right| right.occurrences.cmp(&left.occurrences));
+    items.sort_by_key(|item| Reverse(item.occurrences));
     Ok(items)
 }
 

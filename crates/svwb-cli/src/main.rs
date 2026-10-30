@@ -4,11 +4,10 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use svwb_core::{
     Operator, RuntimeProbe, RuntimeProbeStatus, RuntimeProfile,
     credential::{inspect_cygames_systemd, inspect_netease_auth},
-    detect::{PythonDumperOptions, default_python_dumper, detect_with_python_dumper},
     doctor::{CheckStatus, run as run_doctor},
     native_detect::{NativeDetectorOptions, complete_native_detection, detect_with_native},
     probe::{
@@ -25,13 +24,8 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum DetectEngine {
-    Python,
-    Native,
-}
-
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Check local toolkit configuration and external commands
     Doctor {
@@ -58,6 +52,7 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum ProfileCommand {
     /// Validate a runtime profile
     Validate {
@@ -121,16 +116,10 @@ enum ProfileCommand {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Detect the running Cygames client through the current dumper adapter
+    /// Detect the running Cygames client
     Detect {
         #[arg(long, default_value = "cygames")]
         operator: String,
-        #[arg(long)]
-        dumper: Option<PathBuf>,
-        #[arg(long, value_enum, default_value = "native")]
-        engine: DetectEngine,
-        #[arg(long, default_value = "python3")]
-        python: PathBuf,
         #[arg(long)]
         game_root: Option<PathBuf>,
         #[arg(long)]
@@ -212,9 +201,6 @@ fn run() -> Result<()> {
             ProfileCommand::ImportDumper { file, output } => import_dumper(&file, &output),
             ProfileCommand::Detect {
                 operator,
-                dumper,
-                engine,
-                python,
                 game_root,
                 data_root,
                 variant,
@@ -232,9 +218,6 @@ fn run() -> Result<()> {
                 output,
             } => detect_profile(
                 &operator,
-                dumper,
-                engine,
-                python,
                 game_root,
                 data_root,
                 &variant,
@@ -371,9 +354,6 @@ fn import_dumper(file: &Path, output: &Path) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn detect_profile(
     operator: &str,
-    dumper: Option<PathBuf>,
-    engine: DetectEngine,
-    python: PathBuf,
     game_root: Option<PathBuf>,
     data_root: Option<PathBuf>,
     variant: &str,
@@ -394,98 +374,69 @@ fn detect_profile(
     if operator != Operator::Cygames {
         bail!("profile detect currently supports operator cygames only");
     }
-    let (profile, raw) = match engine {
-        DetectEngine::Python => {
-            if memory_dump.is_some() {
-                bail!("--memory-dump applies to the native engine only");
-            }
-            let script = dumper.or_else(default_python_dumper).ok_or_else(|| {
-                anyhow::anyhow!("dumper script not found; pass --dumper or set SVWB_DUMPER")
-            })?;
-            let profile = detect_with_python_dumper(&PythonDumperOptions {
-                python,
-                script,
-                game_root,
-                data_root,
-                variant: variant.into(),
-                pid,
-            })?;
-            (profile, None)
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+    let game_root =
+        game_root.unwrap_or_else(|| home.join(".local/share/Steam/steamapps/common/ShadowverseWB"));
+    let data_root = data_root.unwrap_or_else(|| home.join("Data/svwb_dumper"));
+    let il2cpp_dumper_dir =
+        il2cpp_dumper_dir.unwrap_or_else(|| home.join(".local/share/svwb_dumper/Il2CppDumper"));
+    let result = detect_with_native(&NativeDetectorOptions {
+        game_root,
+        data_root,
+        process_name: process.into(),
+        pid,
+        memory_dump,
+        variant: variant.into(),
+        min_region_bytes: min_region_kib.saturating_mul(1024),
+        max_region_bytes: max_region_mib.saturating_mul(1024 * 1024),
+        dotnet,
+        il2cpp_dumper_dir,
+        refresh_dump,
+    })?;
+    let mut raw = result.raw.clone();
+    let profile = if let Some(profile) = &result.profile {
+        profile.clone()
+    } else {
+        if let Some(raw_output) = raw_output {
+            let body = serde_json::to_string_pretty(&raw)? + "\n";
+            write_new_file(raw_output, body.as_bytes())?;
         }
-        DetectEngine::Native => {
-            if dumper.is_some() {
-                bail!("--dumper applies to the Python engine only");
-            }
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
-            let game_root = game_root
-                .unwrap_or_else(|| home.join(".local/share/Steam/steamapps/common/ShadowverseWB"));
-            let data_root = data_root.unwrap_or_else(|| home.join("Data/svwb_dumper"));
-            let il2cpp_dumper_dir = il2cpp_dumper_dir
-                .unwrap_or_else(|| home.join(".local/share/svwb_dumper/Il2CppDumper"));
-            let result = detect_with_native(&NativeDetectorOptions {
-                game_root,
-                data_root,
-                process_name: process.into(),
-                pid,
-                memory_dump,
-                variant: variant.into(),
-                min_region_bytes: min_region_kib.saturating_mul(1024),
-                max_region_bytes: max_region_mib.saturating_mul(1024 * 1024),
-                dotnet,
-                il2cpp_dumper_dir,
-                refresh_dump,
-            })?;
-            let mut raw = result.raw.clone();
-            let profile = if let Some(profile) = &result.profile {
-                profile.clone()
-            } else {
-                if let Some(raw_output) = raw_output {
-                    let body = serde_json::to_string_pretty(&raw)? + "\n";
-                    write_new_file(raw_output, body.as_bytes())?;
-                }
-                let token_file = token_file.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "manifest URL is unavailable; pass --token-file to probe resource_version"
-                    )
-                })?;
-                let probe = probe_cygames_draft_via_wbarts(&result.draft, api_base, token_file)?;
-                if probe.status == RuntimeProbeStatus::Failed {
-                    bail!(
-                        "runtime probe failed: {}",
-                        probe.error.as_deref().unwrap_or("unknown error")
-                    );
-                }
-                let resource_version = probe
-                    .resource_version
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("runtime probe returned no resource_version"))?;
-                let profile = complete_native_detection(&result, resource_version)?;
-                raw["profile_complete"] = serde_json::json!(true);
-                raw["resource_version"] = serde_json::json!(profile.runtime.resource_version);
-                if let Some(manifest) = &profile.manifest_source {
-                    raw["manifest_variant"] = serde_json::json!(manifest.variant);
-                    raw["manifest_url"] = serde_json::json!(manifest.url);
-                    raw["manifest"] = serde_json::json!({
-                        "sha256": manifest.sha256,
-                        "size": manifest.size,
-                    });
-                }
-                profile
-            };
-            (profile, Some(raw))
+        let token_file = token_file.ok_or_else(|| {
+            anyhow::anyhow!(
+                "manifest URL is unavailable; pass --token-file to probe resource_version"
+            )
+        })?;
+        let probe = probe_cygames_draft_via_wbarts(&result.draft, api_base, token_file)?;
+        if probe.status == RuntimeProbeStatus::Failed {
+            bail!(
+                "runtime probe failed: {}",
+                probe.error.as_deref().unwrap_or("unknown error")
+            );
         }
+        let resource_version = probe
+            .resource_version
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("runtime probe returned no resource_version"))?;
+        let profile = complete_native_detection(&result, resource_version)?;
+        raw["profile_complete"] = serde_json::json!(true);
+        raw["resource_version"] = serde_json::json!(profile.runtime.resource_version);
+        if let Some(manifest) = &profile.manifest_source {
+            raw["manifest_variant"] = serde_json::json!(manifest.variant);
+            raw["manifest_url"] = serde_json::json!(manifest.url);
+            raw["manifest"] = serde_json::json!({
+                "sha256": manifest.sha256,
+                "size": manifest.size,
+            });
+        }
+        profile
     };
     let body = serde_json::to_string_pretty(&profile)? + "\n";
     write_new_file(output, body.as_bytes())?;
     if let Some(raw_output) = raw_output {
-        if let Some(raw) = raw {
-            let body = serde_json::to_string_pretty(&raw)? + "\n";
-            write_new_file(raw_output, body.as_bytes())?;
-        } else {
-            eprintln!("raw output is available only with --engine native");
-        }
+        let body = serde_json::to_string_pretty(&raw)? + "\n";
+        write_new_file(raw_output, body.as_bytes())?;
     }
     println!(
         "profile={} profile_id={}",
