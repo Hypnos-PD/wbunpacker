@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "artifact_type": "runtime_probe",
+  "subject_type": "runtime_profile",
+  "subject_id": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "operator": "cygames",
+  "tested_at": "2026-10-30T08:00:00Z",
+  "request_scope": "title_version",
+  "status": "success",
+  "resource_version": "318861727954",
+  "app_version": "1.9.10",
+  "resource_version_unknown": false
+}

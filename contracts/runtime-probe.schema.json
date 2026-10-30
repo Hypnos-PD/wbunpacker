@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sva.hypd.asia/contracts/runtime-probe.schema.json",
+  "title": "SVWB Runtime Probe",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "subject_type",
+    "subject_id",
+    "operator",
+    "tested_at",
+    "request_scope",
+    "status",
+    "resource_version_unknown"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "artifact_type": {
+      "const": "runtime_probe"
+    },
+    "subject_type": {
+      "enum": ["runtime_profile", "runtime_profile_draft"]
+    },
+    "subject_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "operator": {
+      "enum": ["cygames", "netease"]
+    },
+    "tested_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "request_scope": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": ["success", "failed"]
+    },
+    "resource_version": {
+      "type": "string",
+      "pattern": "^(?!0+$)[0-9]+$"
+    },
+    "app_version": {
+      "type": "string",
+      "pattern": "^[0-9]+(?:\\.[0-9]+){0,3}$"
+    },
+    "resource_version_unknown": {
+      "type": "boolean"
+    },
+    "error": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "success" }
+        }
+      },
+      "then": {
+        "required": ["app_version"],
+        "anyOf": [
+          { "required": ["resource_version"] },
+          {
+            "properties": {
+              "resource_version_unknown": { "const": true }
+            }
+          }
+        ],
+        "not": {
+          "required": ["error"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "failed" }
+        }
+      },
+      "then": {
+        "required": ["error"]
+      }
+    }
+  ]
+}

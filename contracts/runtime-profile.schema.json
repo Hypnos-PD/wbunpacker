@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sva.hypd.asia/contracts/runtime-profile.schema.json",
+  "title": "SVWB Runtime Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "operator",
+    "game_build",
+    "runtime",
+    "protocol",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "artifact_type": {
+      "const": "runtime_profile"
+    },
+    "operator": {
+      "enum": ["cygames", "netease"]
+    },
+    "game_build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gameassembly_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "exe_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unity_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "metadata_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "anyOf": [
+        { "required": ["gameassembly_sha256"] },
+        { "required": ["exe_version"] }
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_url", "resource_version", "app_version"],
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "resource_version": {
+          "type": "string",
+          "pattern": "^(?!0+$)[0-9]+$"
+        },
+        "app_version": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+){0,3}$"
+        }
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "codec_version"],
+      "properties": {
+        "family": {
+          "enum": ["cygames_v1", "netease_v1"]
+        },
+        "codec_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "routing_header": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{16,64}$"
+        },
+        "common_header": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{104}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "family": { "const": "cygames_v1" }
+            }
+          },
+          "then": {
+            "required": ["routing_header", "common_header"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "family": { "const": "netease_v1" }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["routing_header"] },
+                { "required": ["common_header"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "client_headers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "manifest_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "url", "sha256", "size"],
+      "properties": {
+        "variant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["producer", "producer_version", "generated_at"],
+      "properties": {
+        "producer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "producer_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operator": { "const": "cygames" }
+        }
+      },
+      "then": {
+        "properties": {
+          "protocol": {
+            "properties": {
+              "family": { "const": "cygames_v1" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operator": { "const": "netease" }
+        }
+      },
+      "then": {
+        "properties": {
+          "protocol": {
+            "properties": {
+              "family": { "const": "netease_v1" }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

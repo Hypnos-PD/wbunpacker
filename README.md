@@ -97,6 +97,23 @@ cargo build --release
 
 ## Usage
 
+### SVWB Toolkit
+
+`svwb` 提供 RuntimeProfile、账号材料和 Probe 的统一入口。
+
+```bash
+cargo run -p svwb-cli --bin svwb -- doctor
+cargo run -p svwb-cli --bin svwb -- profile validate contracts/examples/runtime-profile.cygames.json
+```
+
+文档：
+
+- [数据概念](docs/concepts.md)
+- [RuntimeProfile](docs/runtime-profile.md)
+- [账号材料](docs/credentials.md)
+- [CLI](docs/svwb-cli.md)
+- [GUI](docs/svwb-gui.md)
+
 ### Manifest
 
 ```bash

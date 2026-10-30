@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
+exclude = ["apps/svwb-gui/src-tauri"]
 members = [
   "crates/cli",
+  "crates/svwb-cli",
+  "crates/svwb-core",
   "crates/manifest",
   "crates/asset",
   "crates/master-data",
@@ -14,4 +17,3 @@ members = [
 version = "0.1.1"
 edition = "2024"
 license = "MIT"
-

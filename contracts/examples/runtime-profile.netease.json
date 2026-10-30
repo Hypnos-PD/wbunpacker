@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "artifact_type": "runtime_profile",
+  "operator": "netease",
+  "game_build": {
+    "gameassembly_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "exe_version": "11.9.11",
+    "unity_version": "2022.3.62f2"
+  },
+  "runtime": {
+    "base_url": "https://example.invalid",
+    "resource_version": "10000200",
+    "app_version": "11.9.11"
+  },
+  "protocol": {
+    "family": "netease_v1",
+    "codec_version": "1"
+  },
+  "client_headers": {
+    "app_channel": "netease",
+    "device": "3",
+    "platform": "4"
+  },
+  "provenance": {
+    "producer": "svwb",
+    "producer_version": "0.1.1",
+    "generated_at": "2026-10-30T08:00:00Z"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "artifact_type": "runtime_profile",
+  "operator": "cygames",
+  "game_build": {
+    "gameassembly_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "exe_version": "1.9.10.19088",
+    "unity_version": "2022.3.62f2",
+    "metadata_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "runtime": {
+    "base_url": "https://web11.shadowverse-wb.jp",
+    "resource_version": "318861727954",
+    "app_version": "1.9.10"
+  },
+  "protocol": {
+    "family": "cygames_v1",
+    "codec_version": "1",
+    "routing_header": "Abcdefghijklmnop1234",
+    "common_header": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+  },
+  "client_headers": {
+    "device_name": "Windows PC",
+    "device": "3",
+    "platform": "4"
+  },
+  "provenance": {
+    "producer": "svwb",
+    "producer_version": "0.1.1",
+    "generated_at": "2026-10-30T08:00:00Z"
+  }
+}
