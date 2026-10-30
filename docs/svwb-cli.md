@@ -40,7 +40,7 @@ svwb probe validate <file> [--json]
 
 `profile id` 输出 RuntimeProfile 的稳定内容指纹。
 
-`profile probe` 将 profile 提交给 WBArts 执行 Cygames 轻量探测。JWT 文件权限必须排除 group/other。接口不修改 active profile。
+`profile probe` 将 profile 提交给 WBArts 执行轻量探测。Cygames 使用 `Title/index`、`Version/info`；Netease 使用公开的 `serverlist_wizard2`、`pc_serverlist_game`。JWT 文件权限必须排除 group/other。接口不修改 active profile。
 
 `profile import-dumper` 读取 `svwb_dumper` 的 `runtime.json`，转换为 RuntimeProfile。
 

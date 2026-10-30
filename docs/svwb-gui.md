@@ -17,7 +17,7 @@
 | 环境检查 | 调用 `doctor_report`，显示配置和外部命令状态 |
 | Profile | 检测运行中的 Cygames 客户端，生成并校验 RuntimeProfile |
 | 账号材料 | 调用 `credential_inspect`，显示脱敏材料和指纹 |
-| Runtime Probe | 调用 `probe_profile`，通过 WBArts 执行 Cygames 轻量探测 |
+| Runtime Probe | 调用 `probe_profile`，通过 WBArts 执行 Cygames 或 Netease 轻量探测 |
 
 ## 命令
 

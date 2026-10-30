@@ -62,6 +62,8 @@ RuntimeProfile 不包含以下字段：
 
 ## 探测流程
 
+Cygames：
+
 ```text
 读取 credential
   -> 读取 RuntimeProfile
@@ -71,7 +73,19 @@ RuntimeProfile 不包含以下字段：
   -> 解除账号锁
 ```
 
-`RuntimeProbe` 与 `rank collect` 使用同一账号锁。Cygames 探测只执行 `Title/index` 和 `Version/info`。Netease 是否能在不执行完整账号队列流程时读取资源版本，需要实机验证。
+`request_scope` 为 `title_version`。`RuntimeProbe` 与 `rank collect` 使用同一账号锁。
+
+Netease：
+
+```text
+读取 RuntimeProfile
+  -> GET serverlist_wizard2
+  -> 取正式服、all/all、isDebug=0 条目的 resVer
+  -> GET pc_serverlist_game
+  -> 输出 RuntimeProbe
+```
+
+`request_scope` 为 `server_list`。该流程不使用游戏账号材料，也不获取账号锁。
 
 ## 发布流程
 

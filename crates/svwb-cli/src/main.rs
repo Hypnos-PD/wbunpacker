@@ -12,7 +12,7 @@ use svwb_core::{
     native_detect::{NativeDetectorOptions, complete_native_detection, detect_with_native},
     probe::{
         activate_runtime_profile, get_active_runtime_profile, list_runtime_profiles,
-        probe_cygames_draft_via_wbarts, probe_cygames_via_wbarts, publish_runtime_profile,
+        probe_runtime_draft_via_wbarts, probe_runtime_profile_via_wbarts, publish_runtime_profile,
         runtime_profile_from_dumper,
     },
 };
@@ -408,7 +408,7 @@ fn detect_profile(
                 "manifest URL is unavailable; pass --token-file to probe resource_version"
             )
         })?;
-        let probe = probe_cygames_draft_via_wbarts(&result.draft, api_base, token_file)?;
+        let probe = probe_runtime_draft_via_wbarts(&result.draft, api_base, token_file)?;
         if probe.status == RuntimeProbeStatus::Failed {
             bail!(
                 "runtime probe failed: {}",
@@ -454,7 +454,7 @@ fn probe_profile(
     json: bool,
 ) -> Result<()> {
     let profile = RuntimeProfile::load(file)?;
-    let probe = probe_cygames_via_wbarts(&profile, api_base, token_file)?;
+    let probe = probe_runtime_profile_via_wbarts(&profile, api_base, token_file)?;
     let body = serde_json::to_string_pretty(&probe)? + "\n";
     if let Some(output) = output {
         write_new_file(output, body.as_bytes())?;

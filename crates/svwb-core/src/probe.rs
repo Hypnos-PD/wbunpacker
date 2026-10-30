@@ -70,15 +70,12 @@ pub fn runtime_profile_from_dumper(value: &Value) -> Result<RuntimeProfile> {
     Ok(profile)
 }
 
-pub fn probe_cygames_via_wbarts(
+pub fn probe_runtime_profile_via_wbarts(
     profile: &RuntimeProfile,
     api_base: &str,
     token_file: &Path,
 ) -> Result<RuntimeProbe> {
     profile.require_valid()?;
-    if profile.operator != Operator::Cygames {
-        bail!("remote probe currently supports operator cygames only");
-    }
     let value = send_admin(
         api_base,
         token_file,
@@ -104,14 +101,11 @@ pub fn probe_cygames_via_wbarts(
     Ok(probe)
 }
 
-pub fn probe_cygames_draft_via_wbarts(
+pub fn probe_runtime_draft_via_wbarts(
     profile: &RuntimeProfile,
     api_base: &str,
     token_file: &Path,
 ) -> Result<RuntimeProbe> {
-    if profile.operator != Operator::Cygames {
-        bail!("remote probe currently supports operator cygames only");
-    }
     let value = send_admin(
         api_base,
         token_file,

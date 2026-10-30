@@ -9,7 +9,7 @@ use svwb_core::{
     doctor::{DoctorReport, run as run_doctor},
     native_detect::{NativeDetectorOptions, complete_native_detection, detect_with_native},
     probe::{
-        activate_runtime_profile, probe_cygames_draft_via_wbarts, probe_cygames_via_wbarts,
+        activate_runtime_profile, probe_runtime_draft_via_wbarts, probe_runtime_profile_via_wbarts,
         publish_runtime_profile,
     },
 };
@@ -59,7 +59,7 @@ async fn probe_profile(
     tauri::async_runtime::spawn_blocking(move || {
         let profile =
             RuntimeProfile::load(&PathBuf::from(path)).map_err(|error| error.to_string())?;
-        probe_cygames_via_wbarts(&profile, &api_base, &PathBuf::from(token_file))
+        probe_runtime_profile_via_wbarts(&profile, &api_base, &PathBuf::from(token_file))
             .map_err(|error| error.to_string())
     })
     .await
@@ -139,7 +139,7 @@ async fn detect_profile(
             let token_file = token_file
                 .ok_or_else(|| "manifest URL and JWT file are unavailable".to_string())?;
             let token_path = PathBuf::from(token_file);
-            let probe = probe_cygames_draft_via_wbarts(&detection.draft, &api_base, &token_path)
+            let probe = probe_runtime_draft_via_wbarts(&detection.draft, &api_base, &token_path)
                 .map_err(|error| error.to_string())?;
             let resource_version = probe
                 .resource_version
