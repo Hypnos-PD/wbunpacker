@@ -59,4 +59,4 @@
 | `unlimited` | 无限模式。 |
 | `captured_at` | 实际取得数据的时间。 |
 | `snapshot_at` | 数据归属的固定采集时点。 |
-| `game_date` | 按游戏服务器时区计算的日期。Cygames 使用 UTC，Netease 使用 UTC+8。 |
+| `game_date` | 按游戏服务器时区计算的日期。Cygames 使用 UTC+9，Netease 使用 UTC+8。 |
