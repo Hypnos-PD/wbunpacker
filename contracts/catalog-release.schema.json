@@ -82,11 +82,15 @@
     "file": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "size", "sha256"],
+      "required": ["path", "object", "size", "sha256"],
       "properties": {
         "path": {
           "type": "string",
           "pattern": "^data/(?!wbcapture/)(?:[^/]+/)*[^/]+$"
+        },
+        "object": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{2}/[0-9a-f]{64}(\\.[A-Za-z0-9]{1,16})?$"
         },
         "size": {
           "type": "integer",

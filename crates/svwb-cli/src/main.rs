@@ -226,6 +226,13 @@ enum CatalogCommand {
         #[arg(long)]
         previous: Option<PathBuf>,
     },
+    /// Generate the mutable latest.json pointer for a release
+    Pointer {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 fn main() {
@@ -335,6 +342,7 @@ fn run() -> Result<()> {
                 output,
                 previous,
             } => stage_catalog(&root, &manifest, &output, previous.as_deref()),
+            CatalogCommand::Pointer { manifest, output } => catalog_pointer(&manifest, &output),
         },
     }
 }
@@ -772,6 +780,21 @@ fn stage_catalog(
         summary.reused,
         summary.skipped,
         summary.copied_bytes
+    );
+    Ok(())
+}
+
+fn catalog_pointer(manifest: &Path, output: &Path) -> Result<()> {
+    let release = CatalogRelease::load(manifest)?;
+    let pointer = release.pointer();
+    pointer.validate()?;
+    let body = serde_json::to_string_pretty(&pointer)? + "\n";
+    write_new_file(output, body.as_bytes())?;
+    println!(
+        "pointer={} release_id={} manifest={}",
+        output.display(),
+        pointer.release_id,
+        pointer.manifest
     );
     Ok(())
 }

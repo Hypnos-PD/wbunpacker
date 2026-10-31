@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "release_id": "sha256:17bfcd5f2812f28a5b6cd90369fb8b61701c2078ac88ba5ae263782afa9c6ae7",
+  "generated_at": "2026-10-31T08:00:00Z",
+  "manifest": "releases/17bfcd5f2812f28a5b6cd90369fb8b61701c2078ac88ba5ae263782afa9c6ae7.json",
+  "object_base": "objects/",
+  "file_count": 1,
+  "total_bytes": 1234
+}

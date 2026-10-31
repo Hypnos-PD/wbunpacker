@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sva.hypd.asia/contracts/catalog-pointer.schema.json",
+  "title": "WBU Catalog Pointer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release_id",
+    "generated_at",
+    "manifest",
+    "object_base",
+    "file_count",
+    "total_bytes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "release_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "manifest": {
+      "type": "string",
+      "pattern": "^releases/[0-9a-f]{64}\\.json$"
+    },
+    "object_base": {
+      "const": "objects/"
+    },
+    "file_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "total_bytes": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

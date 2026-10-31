@@ -86,7 +86,7 @@ stage/
   manifest.json
   objects/
     ab/
-      <sha256>
+      <sha256>.<原扩展名>
 ```
 
 传入上一版本时只复制新增和变化的文件：
@@ -100,6 +100,38 @@ svwb catalog stage \
 ```
 
 复制时重新计算每个文件的大小和 SHA-256，与 manifest 不一致时中止。
+
+生成发布指针：
+
+```bash
+svwb catalog pointer \
+  --manifest artifacts/catalog-release/manifest.json \
+  --output artifacts/catalog-release/latest.json
+```
+
+远端布局：
+
+```text
+latest.json
+releases/<release-id-without-prefix>.json
+objects/<sha256 前两位>/<sha256>.<原扩展名>
+```
+
+`latest.json`：
+
+```json
+{
+  "schema_version": 1,
+  "release_id": "sha256:...",
+  "generated_at": "2026-10-31T08:00:00Z",
+  "manifest": "releases/<id>.json",
+  "object_base": "objects/",
+  "file_count": 37633,
+  "total_bytes": 10151262444
+}
+```
+
+`manifest` 和 `object_base` 是相对于 `latest.json` 地址的路径。
 
 ## sources
 

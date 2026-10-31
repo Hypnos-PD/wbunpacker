@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, File},
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use anyhow::{Context, Result, bail};
@@ -54,6 +54,7 @@ pub enum CatalogSourceKind {
 #[serde(deny_unknown_fields)]
 pub struct CatalogFile {
     pub path: String,
+    pub object: String,
     pub size: u64,
     pub sha256: String,
 }
@@ -61,6 +62,18 @@ pub struct CatalogFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CatalogSummary {
     pub release_id: String,
+    pub file_count: usize,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogPointer {
+    pub schema_version: u32,
+    pub release_id: String,
+    pub generated_at: String,
+    pub manifest: String,
+    pub object_base: String,
     pub file_count: usize,
     pub total_bytes: u64,
 }
@@ -154,6 +167,9 @@ impl CatalogRelease {
             if !valid_sha256(&file.sha256) {
                 bail!("catalog file {} has an invalid SHA-256", file.path);
             }
+            if file.object != object_key(&file.path, &file.sha256) {
+                bail!("catalog file {} has an invalid object key", file.path);
+            }
             if previous.is_some_and(|value: &str| value >= file.path.as_str()) {
                 bail!("catalog files must be sorted by path without duplicates");
             }
@@ -177,6 +193,19 @@ impl CatalogRelease {
         }
     }
 
+    pub fn pointer(&self) -> CatalogPointer {
+        let hash = self.release_id.trim_start_matches("sha256:");
+        CatalogPointer {
+            schema_version: 1,
+            release_id: self.release_id.clone(),
+            generated_at: self.generated_at.clone(),
+            manifest: format!("releases/{hash}.json"),
+            object_base: "objects/".into(),
+            file_count: self.files.len(),
+            total_bytes: self.files.iter().map(|file| file.size).sum(),
+        }
+    }
+
     pub fn verify_root(&self, root: &Path) -> Result<()> {
         let rebuilt = Self::build(
             root,
@@ -188,6 +217,27 @@ impl CatalogRelease {
         }
         if rebuilt.release_id != self.release_id {
             bail!("catalog release_id does not match the current data directory");
+        }
+        Ok(())
+    }
+}
+
+impl CatalogPointer {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != 1 {
+            bail!("catalog pointer schema_version must be 1");
+        }
+        if !valid_release_id(&self.release_id) {
+            bail!("catalog pointer release_id is invalid");
+        }
+        OffsetDateTime::parse(&self.generated_at, &Rfc3339)
+            .context("catalog pointer generated_at must be RFC3339")?;
+        let hash = self.release_id.trim_start_matches("sha256:");
+        if self.manifest != format!("releases/{hash}.json")
+            || self.object_base != "objects/"
+            || self.file_count == 0
+        {
+            bail!("catalog pointer fields are invalid");
         }
         Ok(())
     }
@@ -244,7 +294,7 @@ pub fn stage(
             summary.skipped += 1;
             continue;
         }
-        let object = object_path(&objects, &file.sha256);
+        let object = objects.join(&file.object);
         if object.is_file() {
             summary.reused += 1;
             continue;
@@ -306,10 +356,6 @@ fn copy_object(source: &Path, object: &Path, file: &CatalogFile) -> Result<()> {
     Ok(())
 }
 
-fn object_path(objects: &Path, sha256: &str) -> PathBuf {
-    objects.join(&sha256[..2]).join(sha256)
-}
-
 fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -368,7 +414,12 @@ fn collect_files(root: &Path, directory: &Path, output: &mut Vec<CatalogFile>) -
             .join("/");
         validate_catalog_path(&path)?;
         let (size, sha256) = hash_file(&path, &entry.path())?;
-        output.push(CatalogFile { path, size, sha256 });
+        output.push(CatalogFile {
+            object: object_key(&path, &sha256),
+            path,
+            size,
+            sha256,
+        });
     }
     Ok(())
 }
@@ -427,6 +478,20 @@ fn file_map(files: &[CatalogFile]) -> BTreeMap<&str, &CatalogFile> {
         .iter()
         .map(|file| (file.path.as_str(), file))
         .collect()
+}
+
+fn object_key(path: &str, sha256: &str) -> String {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 16
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+        .map(|value| format!(".{}", value.to_ascii_lowercase()))
+        .unwrap_or_default();
+    format!("{}/{sha256}{extension}", &sha256[..2])
 }
 
 fn validate_catalog_path(path: &str) -> Result<()> {
@@ -537,6 +602,12 @@ mod tests {
         ))
         .unwrap();
         release.validate().unwrap();
+        let pointer: CatalogPointer = serde_json::from_str(include_str!(
+            "../../../contracts/examples/catalog-pointer.json"
+        ))
+        .unwrap();
+        pointer.validate().unwrap();
+        assert_eq!(release.pointer(), pointer);
     }
 
     #[test]
@@ -549,13 +620,11 @@ mod tests {
         let summary = stage(root.path(), &release, None, output.path()).unwrap();
         assert_eq!(summary.copied, 1);
         assert!(output.path().join("manifest.json").is_file());
-        let hash = &release.files[0].sha256;
         assert!(
             output
                 .path()
                 .join("objects")
-                .join(&hash[..2])
-                .join(hash)
+                .join(&release.files[0].object)
                 .is_file()
         );
     }
