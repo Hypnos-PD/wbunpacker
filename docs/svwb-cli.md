@@ -16,6 +16,9 @@ svwb profile active --operator <cygames|cy|netease|ne> --token-file <path>
 svwb profile activate <profile-id> --token-file <path>
 svwb credential inspect --operator <cygames|cy|netease|ne> <path> [--json]
 svwb probe validate <file> [--json]
+svwb catalog build --root <path> --output <manifest.json> [--source-file FILE] [--dry-run]
+svwb catalog verify --root <path> --manifest <manifest.json> [--json]
+svwb catalog diff --old <manifest.json> --new <manifest.json> [--json]
 ```
 
 ## doctor
@@ -75,3 +78,8 @@ Netease：
 ## probe
 
 `probe validate` 校验 RuntimeProbe JSON。当前命令不执行线上探测。
+
+## catalog
+
+`catalog` 生成、校验和比较 WBU CatalogRelease。发布范围、排除目录和
+`release_id` 算法见 [catalog-release.md](catalog-release.md)。

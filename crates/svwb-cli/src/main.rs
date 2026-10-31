@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Result, bail};
+use catalog_release::{CatalogDiff, CatalogRelease, CatalogSource};
 use clap::{Parser, Subcommand};
 use svwb_core::{
     Operator, RuntimeProbe, RuntimeProbeStatus, RuntimeProfile,
@@ -49,6 +50,11 @@ enum Command {
     Probe {
         #[command(subcommand)]
         command: ProbeCommand,
+    },
+    /// Build and compare WBU catalog releases
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommand,
     },
 }
 
@@ -178,6 +184,39 @@ enum ProbeCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum CatalogCommand {
+    /// Build a content-addressed catalog release manifest
+    Build {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        source_file: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Verify a catalog release against its source directory
+    Verify {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare two catalog release manifests
+    Diff {
+        #[arg(long)]
+        old: PathBuf,
+        #[arg(long)]
+        new: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -265,6 +304,20 @@ fn run() -> Result<()> {
         },
         Command::Probe { command } => match command {
             ProbeCommand::Validate { file, json } => validate_probe(&file, json),
+        },
+        Command::Catalog { command } => match command {
+            CatalogCommand::Build {
+                root,
+                output,
+                source_file,
+                dry_run,
+            } => build_catalog(&root, output.as_deref(), source_file.as_deref(), dry_run),
+            CatalogCommand::Verify {
+                root,
+                manifest,
+                json,
+            } => verify_catalog(&root, &manifest, json),
+            CatalogCommand::Diff { old, new, json } => diff_catalog(&old, &new, json),
         },
     }
 }
@@ -579,6 +632,108 @@ fn validate_probe(file: &Path, json: bool) -> Result<()> {
     }
     if !issues.is_empty() {
         bail!("runtime probe has {} validation issue(s)", issues.len());
+    }
+    Ok(())
+}
+
+fn build_catalog(
+    root: &Path,
+    output: Option<&Path>,
+    source_file: Option<&Path>,
+    dry_run: bool,
+) -> Result<()> {
+    let sources: Vec<CatalogSource> = match source_file {
+        Some(path) => serde_json::from_str(
+            &std::fs::read_to_string(path)
+                .map_err(|error| anyhow::anyhow!("read {}: {error}", path.display()))?,
+        )
+        .map_err(|error| anyhow::anyhow!("parse {}: {error}", path.display()))?,
+        None => Vec::new(),
+    };
+    let release = CatalogRelease::build_now(root, sources)?;
+    if dry_run {
+        println!("{}", serde_json::to_string_pretty(&release.summary())?);
+        return Ok(());
+    }
+    let output =
+        output.ok_or_else(|| anyhow::anyhow!("--output is required unless --dry-run is set"))?;
+    let data_root = root
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("resolve {}: {error}", root.display()))?
+        .join("data");
+    let output_absolute = std::path::absolute(output)
+        .map_err(|error| anyhow::anyhow!("resolve {}: {error}", output.display()))?;
+    if output_absolute.starts_with(data_root) {
+        bail!("catalog manifest output must be outside the data directory");
+    }
+    let body = serde_json::to_string_pretty(&release)? + "\n";
+    write_new_file(output, body.as_bytes())?;
+    println!(
+        "catalog={} release_id={} files={} bytes={}",
+        output.display(),
+        release.release_id,
+        release.files.len(),
+        release.files.iter().map(|file| file.size).sum::<u64>()
+    );
+    Ok(())
+}
+
+fn verify_catalog(root: &Path, manifest: &Path, json: bool) -> Result<()> {
+    let release = CatalogRelease::load(manifest)?;
+    release.verify_root(root)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "release_id": release.release_id,
+                "file_count": release.files.len(),
+            }))?
+        );
+    } else {
+        println!(
+            "valid catalog release: release_id={} files={}",
+            release.release_id,
+            release.files.len()
+        );
+    }
+    Ok(())
+}
+
+fn diff_catalog(old: &Path, new: &Path, json: bool) -> Result<()> {
+    let old = CatalogRelease::load(old)?;
+    let new = CatalogRelease::load(new)?;
+    let diff = CatalogDiff::between(&old, &new);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "old_release_id": old.release_id,
+                "new_release_id": new.release_id,
+                "unchanged": old.release_id == new.release_id,
+                "added": diff.added,
+                "removed": diff.removed,
+                "changed": diff.changed,
+            }))?
+        );
+    } else {
+        println!(
+            "old={} new={} added={} removed={} changed={}",
+            old.release_id,
+            new.release_id,
+            diff.added.len(),
+            diff.removed.len(),
+            diff.changed.len()
+        );
+        for path in &diff.added {
+            println!("A {path}");
+        }
+        for path in &diff.removed {
+            println!("D {path}");
+        }
+        for path in &diff.changed {
+            println!("M {path}");
+        }
     }
     Ok(())
 }

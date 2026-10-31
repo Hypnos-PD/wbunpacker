@@ -2,6 +2,7 @@
 resolver = "3"
 exclude = ["apps/svwb-gui/src-tauri"]
 members = [
+  "crates/catalog-release",
   "crates/cli",
   "crates/svwb-cli",
   "crates/svwb-core",

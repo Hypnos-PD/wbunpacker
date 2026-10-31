@@ -96,6 +96,16 @@ cargo build --release
 
 ## 用法
 
+### SVWB Toolkit
+
+```bash
+cargo run -p svwb-cli --bin svwb -- doctor
+cargo run -p svwb-cli --bin svwb -- profile validate contracts/examples/runtime-profile.cygames.json
+cargo run -p svwb-cli --bin svwb -- catalog build --root ../WBArts --dry-run
+```
+
+CatalogRelease 文档见 [catalog-release.md](catalog-release.md)。
+
 ### 清单 (Manifest)
 
 ```bash

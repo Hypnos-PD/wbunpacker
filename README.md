@@ -104,6 +104,7 @@ cargo build --release
 ```bash
 cargo run -p svwb-cli --bin svwb -- doctor
 cargo run -p svwb-cli --bin svwb -- profile validate contracts/examples/runtime-profile.cygames.json
+cargo run -p svwb-cli --bin svwb -- catalog build --root ../WBArts --dry-run
 ```
 
 文档：
@@ -113,6 +114,7 @@ cargo run -p svwb-cli --bin svwb -- profile validate contracts/examples/runtime-
 - [账号材料](docs/credentials.md)
 - [CLI](docs/svwb-cli.md)
 - [GUI](docs/svwb-gui.md)
+- [CatalogRelease](docs/catalog-release.md)
 
 ### Manifest
 

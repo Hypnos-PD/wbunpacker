@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "release_id": "sha256:17bfcd5f2812f28a5b6cd90369fb8b61701c2078ac88ba5ae263782afa9c6ae7",
+  "generated_at": "2026-10-31T08:00:00Z",
+  "producer": {
+    "name": "wbunpacker",
+    "version": "0.1.1"
+  },
+  "sources": [
+    {
+      "kind": "game_resources",
+      "name": "cygames",
+      "reference": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ],
+  "files": [
+    {
+      "path": "data/cards.json",
+      "size": 1234,
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ]
+}
