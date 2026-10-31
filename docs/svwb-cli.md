@@ -19,6 +19,7 @@ svwb probe validate <file> [--json]
 svwb catalog build --root <path> --output <manifest.json> [--source-file FILE] [--dry-run]
 svwb catalog verify --root <path> --manifest <manifest.json> [--json]
 svwb catalog diff --old <manifest.json> --new <manifest.json> [--json]
+svwb catalog stage --root <path> --manifest <manifest.json> --output <dir> [--previous <manifest.json>]
 ```
 
 ## doctor

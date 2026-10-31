@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use catalog_release::{CatalogDiff, CatalogRelease, CatalogSource};
+use catalog_release::{CatalogDiff, CatalogRelease, CatalogSource, stage as stage_catalog_release};
 use clap::{Parser, Subcommand};
 use svwb_core::{
     Operator, RuntimeProbe, RuntimeProbeStatus, RuntimeProfile,
@@ -215,6 +215,17 @@ enum CatalogCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Materialize a manifest into content-addressed objects
+    Stage {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        previous: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -318,6 +329,12 @@ fn run() -> Result<()> {
                 json,
             } => verify_catalog(&root, &manifest, json),
             CatalogCommand::Diff { old, new, json } => diff_catalog(&old, &new, json),
+            CatalogCommand::Stage {
+                root,
+                manifest,
+                output,
+                previous,
+            } => stage_catalog(&root, &manifest, &output, previous.as_deref()),
         },
     }
 }
@@ -735,6 +752,27 @@ fn diff_catalog(old: &Path, new: &Path, json: bool) -> Result<()> {
             println!("M {path}");
         }
     }
+    Ok(())
+}
+
+fn stage_catalog(
+    root: &Path,
+    manifest: &Path,
+    output: &Path,
+    previous: Option<&Path>,
+) -> Result<()> {
+    let release = CatalogRelease::load(manifest)?;
+    let previous_release = previous.map(CatalogRelease::load).transpose()?;
+    let summary = stage_catalog_release(root, &release, previous_release.as_ref(), output)?;
+    println!(
+        "staged={} release_id={} copied={} reused={} skipped={} bytes={}",
+        output.display(),
+        release.release_id,
+        summary.copied,
+        summary.reused,
+        summary.skipped,
+        summary.copied_bytes
+    );
     Ok(())
 }
 

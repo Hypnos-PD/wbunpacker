@@ -1,8 +1,8 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::Read,
-    path::Path,
+    io::{Read, Write},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
@@ -70,6 +70,14 @@ pub struct CatalogDiff {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     pub changed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CatalogStageSummary {
+    pub copied: usize,
+    pub reused: usize,
+    pub skipped: usize,
+    pub copied_bytes: u64,
 }
 
 impl CatalogRelease {
@@ -210,6 +218,109 @@ impl CatalogDiff {
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
     }
+}
+
+pub fn stage(
+    root: &Path,
+    release: &CatalogRelease,
+    previous: Option<&CatalogRelease>,
+    output: &Path,
+) -> Result<CatalogStageSummary> {
+    release.validate()?;
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("resolve catalog root: {}", root.display()))?;
+    let objects = output.join("objects");
+    fs::create_dir_all(&objects)
+        .with_context(|| format!("create catalog object directory: {}", objects.display()))?;
+    let previous_files = previous.map(|release| file_map(&release.files));
+    let mut summary = CatalogStageSummary::default();
+    for file in &release.files {
+        if previous_files
+            .as_ref()
+            .and_then(|files| files.get(file.path.as_str()))
+            .is_some_and(|old| old.size == file.size && old.sha256 == file.sha256)
+        {
+            summary.skipped += 1;
+            continue;
+        }
+        let object = object_path(&objects, &file.sha256);
+        if object.is_file() {
+            summary.reused += 1;
+            continue;
+        }
+        if let Some(parent) = object.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create object directory: {}", parent.display()))?;
+        }
+        let source = root.join(&file.path);
+        copy_object(&source, &object, file)?;
+        summary.copied += 1;
+        summary.copied_bytes += file.size;
+    }
+    let manifest = serde_json::to_vec_pretty(release)?;
+    write_atomic(&output.join("manifest.json"), &manifest)?;
+    Ok(summary)
+}
+
+fn copy_object(source: &Path, object: &Path, file: &CatalogFile) -> Result<()> {
+    let mut input =
+        File::open(source).with_context(|| format!("open catalog file: {}", source.display()))?;
+    let temporary = object.with_extension(format!("tmp-{}", std::process::id()));
+    let mut output = File::create(&temporary)
+        .with_context(|| format!("create staged object: {}", temporary.display()))?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .with_context(|| format!("read catalog file: {}", source.display()))?;
+        if read == 0 {
+            break;
+        }
+        size += read as u64;
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .with_context(|| format!("write staged object: {}", temporary.display()))?;
+    }
+    output
+        .flush()
+        .with_context(|| format!("flush staged object: {}", temporary.display()))?;
+    drop(output);
+    let digest = format!("{:x}", hasher.finalize());
+    if size != file.size || digest != file.sha256 {
+        let _ = fs::remove_file(&temporary);
+        bail!(
+            "catalog file changed while staging: path={} manifest={}x{} actual={}x{}",
+            file.path,
+            file.size,
+            file.sha256,
+            size,
+            digest
+        );
+    }
+    fs::rename(&temporary, object)
+        .with_context(|| format!("publish staged object: {}", object.display()))?;
+    Ok(())
+}
+
+fn object_path(objects: &Path, sha256: &str) -> PathBuf {
+    objects.join(&sha256[..2]).join(sha256)
+}
+
+fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create manifest directory: {}", parent.display()))?;
+    }
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&temporary, body)
+        .with_context(|| format!("write staged manifest: {}", temporary.display()))?;
+    fs::rename(&temporary, path)
+        .with_context(|| format!("publish staged manifest: {}", path.display()))?;
+    Ok(())
 }
 
 fn collect_files(root: &Path, directory: &Path, output: &mut Vec<CatalogFile>) -> Result<()> {
@@ -426,5 +537,46 @@ mod tests {
         ))
         .unwrap();
         release.validate().unwrap();
+    }
+
+    #[test]
+    fn stage_writes_content_addressed_objects_and_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "data/a.json", b"a");
+        let release =
+            CatalogRelease::build(root.path(), vec![], OffsetDateTime::UNIX_EPOCH).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let summary = stage(root.path(), &release, None, output.path()).unwrap();
+        assert_eq!(summary.copied, 1);
+        assert!(output.path().join("manifest.json").is_file());
+        let hash = &release.files[0].sha256;
+        assert!(
+            output
+                .path()
+                .join("objects")
+                .join(&hash[..2])
+                .join(hash)
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn stage_delta_skips_unchanged_files() {
+        let old_root = tempfile::tempdir().unwrap();
+        write(old_root.path(), "data/same.json", b"same");
+        write(old_root.path(), "data/change.json", b"old");
+        let old =
+            CatalogRelease::build(old_root.path(), vec![], OffsetDateTime::UNIX_EPOCH).unwrap();
+
+        let new_root = tempfile::tempdir().unwrap();
+        write(new_root.path(), "data/same.json", b"same");
+        write(new_root.path(), "data/change.json", b"new");
+        let new =
+            CatalogRelease::build(new_root.path(), vec![], OffsetDateTime::UNIX_EPOCH).unwrap();
+
+        let output = tempfile::tempdir().unwrap();
+        let summary = stage(new_root.path(), &new, Some(&old), output.path()).unwrap();
+        assert_eq!(summary.copied, 1);
+        assert_eq!(summary.skipped, 1);
     }
 }

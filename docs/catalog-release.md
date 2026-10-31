@@ -70,6 +70,37 @@ svwb catalog diff \
 
 `--json` 输出稳定 JSON。
 
+生成内容寻址 staging：
+
+```bash
+svwb catalog stage \
+  --root ../WBArts \
+  --manifest artifacts/catalog-release/manifest.json \
+  --output artifacts/catalog-release/stage
+```
+
+输出结构：
+
+```text
+stage/
+  manifest.json
+  objects/
+    ab/
+      <sha256>
+```
+
+传入上一版本时只复制新增和变化的文件：
+
+```bash
+svwb catalog stage \
+  --root ../WBArts \
+  --manifest new-manifest.json \
+  --previous old-manifest.json \
+  --output artifacts/catalog-release/delta
+```
+
+复制时重新计算每个文件的大小和 SHA-256，与 manifest 不一致时中止。
+
 ## sources
 
 `sources` 通过 JSON 文件提供：
