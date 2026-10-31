@@ -8,6 +8,7 @@ use svwb_core::{
     credential::{CredentialSummary, inspect_cygames_systemd, inspect_netease_auth},
     doctor::{DoctorReport, run as run_doctor},
     native_detect::{NativeDetectorOptions, complete_native_detection, detect_with_native},
+    netease_detect::{NeteaseDetectorOptions, detect as detect_netease},
     probe::{
         activate_runtime_profile, probe_runtime_draft_via_wbarts, probe_runtime_profile_via_wbarts,
         publish_runtime_profile,
@@ -99,6 +100,7 @@ async fn activate_profile(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn detect_profile(
+    operator: String,
     game_root: Option<String>,
     data_root: Option<String>,
     variant: String,
@@ -110,43 +112,60 @@ async fn detect_profile(
     output: String,
 ) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME is not set".to_string())?;
-        let detection = detect_with_native(&NativeDetectorOptions {
-            game_root: game_root
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".local/share/Steam/steamapps/common/ShadowverseWB")),
-            data_root: data_root
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join("Data/svwb_dumper")),
-            process_name: "ShadowverseWB.exe".into(),
-            pid,
-            memory_dump: None,
-            variant,
-            min_region_bytes: 4 * 1024,
-            max_region_bytes: 256 * 1024 * 1024,
-            dotnet: PathBuf::from(dotnet),
-            il2cpp_dumper_dir: il2cpp_dumper_dir
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".local/share/svwb_dumper/Il2CppDumper")),
-            refresh_dump: false,
-        })
-        .map_err(|error| error.to_string())?;
-        let profile = if let Some(profile) = detection.profile {
-            profile
-        } else {
-            let token_file = token_file
-                .ok_or_else(|| "manifest URL and JWT file are unavailable".to_string())?;
-            let token_path = PathBuf::from(token_file);
-            let probe = probe_runtime_draft_via_wbarts(&detection.draft, &api_base, &token_path)
-                .map_err(|error| error.to_string())?;
-            let resource_version = probe
-                .resource_version
-                .as_deref()
-                .ok_or_else(|| "probe returned no resource_version".to_string())?;
-            complete_native_detection(&detection, resource_version)
+        let operator = Operator::from_str(&operator).map_err(str::to_string)?;
+        let profile = match operator {
+            Operator::Netease => {
+                let game_root = game_root
+                    .ok_or_else(|| "Netease detection requires a game directory".to_string())?;
+                detect_netease(&NeteaseDetectorOptions {
+                    game_root: PathBuf::from(game_root),
+                    variant,
+                    timeout: std::time::Duration::from_secs(60),
+                })
                 .map_err(|error| error.to_string())?
+                .profile
+            }
+            Operator::Cygames => {
+                let home = std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .ok_or_else(|| "HOME is not set".to_string())?;
+                let detection = detect_with_native(&NativeDetectorOptions {
+                    game_root: game_root.map(PathBuf::from).unwrap_or_else(|| {
+                        home.join(".local/share/Steam/steamapps/common/ShadowverseWB")
+                    }),
+                    data_root: data_root
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| home.join("Data/svwb_dumper")),
+                    process_name: "ShadowverseWB.exe".into(),
+                    pid,
+                    memory_dump: None,
+                    variant,
+                    min_region_bytes: 4 * 1024,
+                    max_region_bytes: 256 * 1024 * 1024,
+                    dotnet: PathBuf::from(dotnet),
+                    il2cpp_dumper_dir: il2cpp_dumper_dir
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| home.join(".local/share/svwb_dumper/Il2CppDumper")),
+                    refresh_dump: false,
+                })
+                .map_err(|error| error.to_string())?;
+                if let Some(profile) = detection.profile {
+                    profile
+                } else {
+                    let token_file = token_file
+                        .ok_or_else(|| "manifest URL and JWT file are unavailable".to_string())?;
+                    let token_path = PathBuf::from(token_file);
+                    let probe =
+                        probe_runtime_draft_via_wbarts(&detection.draft, &api_base, &token_path)
+                            .map_err(|error| error.to_string())?;
+                    let resource_version = probe
+                        .resource_version
+                        .as_deref()
+                        .ok_or_else(|| "probe returned no resource_version".to_string())?;
+                    complete_native_detection(&detection, resource_version)
+                        .map_err(|error| error.to_string())?
+                }
+            }
         };
         let path = PathBuf::from(&output);
         if let Some(parent) = path.parent() {

@@ -1,6 +1,6 @@
 # Profile Detector
 
-`svwb profile detect` 执行：
+Cygames 检测执行：
 
 1. `/proc` 进程发现和内存区域读取。
 2. manifest URL 与 `App-Ver` 搜索。
@@ -29,7 +29,30 @@ https://shadowverse-wb.akamaized.net/dl/manifests/Windows/{resource_version}/ass
 
 Jpn 变体使用 `assetbundle.manifest`，不带语言段。`resource_version=00000000` 不会拼接 URL。
 
-检测器仅支持 Linux。
+Cygames 检测器仅支持 Linux。
+
+## Netease
+
+Netease 检测读取 `GameAssembly.dll`、公开版本接口和 Chs manifest：
+
+```text
+GameAssembly.dll
+  -> SHA-256
+
+serverlist_wizard2
+  -> 正式服、platform=all、channel=all、isDebug=0
+  -> resVer
+
+pc_serverlist_game
+  -> version
+
+assetbundle.Chs.manifest
+  -> SHA-256 + size
+```
+
+检测结果中的 `client_headers` 为空。账号设备头、AntiCheatValue、SecretKey、UDID 和 SDK 会话不进入 RuntimeProfile。
+
+Netease 检测不要求 Linux 进程或内存读取。
 
 ## 对照基线
 

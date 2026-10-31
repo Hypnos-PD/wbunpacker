@@ -3,23 +3,22 @@
   "artifact_type": "runtime_profile",
   "operator": "netease",
   "game_build": {
-    "gameassembly_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "exe_version": "11.9.11",
-    "unity_version": "2022.3.62f2"
+    "gameassembly_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
   },
   "runtime": {
-    "base_url": "https://example.invalid",
+    "base_url": "https://ma68sv2.game.163.com",
     "resource_version": "10000200",
-    "app_version": "11.9.11"
+    "app_version": "11.10.0"
   },
   "protocol": {
     "family": "netease_v1",
     "codec_version": "1"
   },
-  "client_headers": {
-    "app_channel": "netease",
-    "device": "3",
-    "platform": "4"
+  "manifest_source": {
+    "variant": "Chs",
+    "url": "https://ma68.update.netease.com/plx/wizard2/obt/manifests/Windows/develop/assetbundle.Chs.manifest",
+    "sha256": "0b1e5c08ab0459f5a5ca1714dd1a373e53bba56cd39d30a7004577c58476ff8e",
+    "size": 3259617
   },
   "provenance": {
     "producer": "svwb",

@@ -59,6 +59,7 @@ export default function App() {
     "contracts/examples/runtime-profile.cygames.json"
   );
   const [profile, setProfile] = useState<ValidationReport | null>(null);
+  const [detectOperator, setDetectOperator] = useState("cygames");
   const [gameRoot, setGameRoot] = useState("");
   const [dotnetPath, setDotnetPath] = useState("dotnet");
   const [il2cppDumperDir, setIl2cppDumperDir] = useState("");
@@ -135,43 +136,61 @@ export default function App() {
       <section className="panel">
         <h2>Profile</h2>
         <div className="row">
+          <label>
+            运营
+            <select
+              value={detectOperator}
+              onChange={(event) => setDetectOperator(event.target.value)}
+            >
+              <option value="cygames">cygames</option>
+              <option value="netease">netease</option>
+            </select>
+          </label>
           <label className="grow">
             游戏目录
             <input
               value={gameRoot}
               onChange={(event) => setGameRoot(event.target.value)}
-              placeholder="留空使用 dumper 默认值"
+              placeholder={
+                detectOperator === "cygames"
+                  ? "留空使用 Cygames 默认目录"
+                  : "选择国服客户端安装目录"
+              }
             />
           </label>
         </div>
-        <div className="row">
-          <label className="grow">
-            dotnet
-            <input value={dotnetPath} onChange={(event) => setDotnetPath(event.target.value)} />
-          </label>
-          <label className="grow">
-            Il2CppDumper 目录
-            <input
-              value={il2cppDumperDir}
-              onChange={(event) => setIl2cppDumperDir(event.target.value)}
-              placeholder="留空使用默认目录"
-            />
-          </label>
-        </div>
+        {detectOperator === "cygames" && (
+          <div className="row">
+            <label className="grow">
+              dotnet
+              <input value={dotnetPath} onChange={(event) => setDotnetPath(event.target.value)} />
+            </label>
+            <label className="grow">
+              Il2CppDumper 目录
+              <input
+                value={il2cppDumperDir}
+                onChange={(event) => setIl2cppDumperDir(event.target.value)}
+                placeholder="留空使用默认目录"
+              />
+            </label>
+          </div>
+        )}
         <div className="row">
           <button
             disabled={busy}
             onClick={() =>
               run(async () => {
                 const result = await invoke<DetectionResult>("detect_profile", {
+                  operator: detectOperator,
                   gameRoot: gameRoot || null,
                   dataRoot: null,
-                  variant: "Cht",
+                  variant: detectOperator === "cygames" ? "Cht" : "Chs",
                   pid: null,
                   dotnet: dotnetPath,
                   il2cppDumperDir: il2cppDumperDir || null,
                   apiBase,
-                  tokenFile: tokenPath || null,
+                  tokenFile:
+                    detectOperator === "cygames" ? tokenPath || null : null,
                   output: "runtime-profile.detected.json"
                 });
                 setDetected(result);
@@ -179,7 +198,9 @@ export default function App() {
               })
             }
           >
-            检测运行中客户端
+            {detectOperator === "cygames"
+              ? "检测运行中客户端"
+              : "生成国服 RuntimeProfile"}
           </button>
         </div>
         {detected && (

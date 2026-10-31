@@ -9,6 +9,7 @@ use url::Url;
 pub mod credential;
 pub mod doctor;
 pub mod native_detect;
+pub mod netease_detect;
 pub mod probe;
 
 pub const RUNTIME_PROFILE_SCHEMA_VERSION: u32 = 1;

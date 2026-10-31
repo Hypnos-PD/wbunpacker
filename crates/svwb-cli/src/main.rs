@@ -10,6 +10,7 @@ use svwb_core::{
     credential::{inspect_cygames_systemd, inspect_netease_auth},
     doctor::{CheckStatus, run as run_doctor},
     native_detect::{NativeDetectorOptions, complete_native_detection, detect_with_native},
+    netease_detect::{NeteaseDetectorOptions, detect as detect_netease},
     probe::{
         activate_runtime_profile, get_active_runtime_profile, list_runtime_profiles,
         probe_runtime_draft_via_wbarts, probe_runtime_profile_via_wbarts, publish_runtime_profile,
@@ -116,7 +117,7 @@ enum ProfileCommand {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Detect the running Cygames client
+    /// Detect a local Cygames or Netease client
     Detect {
         #[arg(long, default_value = "cygames")]
         operator: String,
@@ -124,8 +125,8 @@ enum ProfileCommand {
         game_root: Option<PathBuf>,
         #[arg(long)]
         data_root: Option<PathBuf>,
-        #[arg(long, default_value = "Cht")]
-        variant: String,
+        #[arg(long)]
+        variant: Option<String>,
         #[arg(long, default_value = "ShadowverseWB.exe")]
         process: String,
         #[arg(long)]
@@ -220,7 +221,7 @@ fn run() -> Result<()> {
                 &operator,
                 game_root,
                 data_root,
-                &variant,
+                variant.as_deref(),
                 &process,
                 pid,
                 memory_dump,
@@ -356,7 +357,7 @@ fn detect_profile(
     operator: &str,
     game_root: Option<PathBuf>,
     data_root: Option<PathBuf>,
-    variant: &str,
+    variant: Option<&str>,
     process: &str,
     pid: Option<u32>,
     memory_dump: Option<PathBuf>,
@@ -371,9 +372,28 @@ fn detect_profile(
     output: &Path,
 ) -> Result<()> {
     let operator = Operator::from_str(operator).map_err(anyhow::Error::msg)?;
-    if operator != Operator::Cygames {
-        bail!("profile detect currently supports operator cygames only");
+    if operator == Operator::Netease {
+        let game_root = game_root
+            .ok_or_else(|| anyhow::anyhow!("--game-root is required for Netease detection"))?;
+        let result = detect_netease(&NeteaseDetectorOptions {
+            game_root,
+            variant: variant.unwrap_or("Chs").into(),
+            timeout: std::time::Duration::from_secs(60),
+        })?;
+        let body = serde_json::to_string_pretty(&result.profile)? + "\n";
+        write_new_file(output, body.as_bytes())?;
+        if let Some(raw_output) = raw_output {
+            let body = serde_json::to_string_pretty(&result.raw)? + "\n";
+            write_new_file(raw_output, body.as_bytes())?;
+        }
+        println!(
+            "profile={} profile_id={}",
+            output.display(),
+            result.profile.profile_id()
+        );
+        return Ok(());
     }
+    let variant = variant.unwrap_or("Cht");
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
