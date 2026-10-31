@@ -21,6 +21,7 @@ svwb catalog verify --root <path> --manifest <manifest.json> [--json]
 svwb catalog diff --old <manifest.json> --new <manifest.json> [--json]
 svwb catalog stage --root <path> --manifest <manifest.json> --output <dir> [--previous <manifest.json>]
 svwb catalog pointer --manifest <manifest.json> --output <latest.json>
+svwb catalog pull --manifest <manifest.json> --root <path> [--base-url URL]
 ```
 
 ## doctor

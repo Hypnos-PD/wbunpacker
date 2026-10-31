@@ -4,7 +4,10 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use catalog_release::{CatalogDiff, CatalogRelease, CatalogSource, stage as stage_catalog_release};
+use catalog_release::{
+    CatalogDiff, CatalogRelease, CatalogSource, pull as pull_catalog_release,
+    stage as stage_catalog_release,
+};
 use clap::{Parser, Subcommand};
 use svwb_core::{
     Operator, RuntimeProbe, RuntimeProbeStatus, RuntimeProfile,
@@ -233,6 +236,15 @@ enum CatalogCommand {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Download a release into its logical data paths
+    Pull {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long, default_value = "https://wbarts-catalog.cn-nb1.rains3.com")]
+        base_url: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
 }
 
 fn main() {
@@ -343,6 +355,11 @@ fn run() -> Result<()> {
                 previous,
             } => stage_catalog(&root, &manifest, &output, previous.as_deref()),
             CatalogCommand::Pointer { manifest, output } => catalog_pointer(&manifest, &output),
+            CatalogCommand::Pull {
+                manifest,
+                base_url,
+                root,
+            } => pull_catalog(&manifest, &base_url, &root),
         },
     }
 }
@@ -795,6 +812,21 @@ fn catalog_pointer(manifest: &Path, output: &Path) -> Result<()> {
         output.display(),
         pointer.release_id,
         pointer.manifest
+    );
+    Ok(())
+}
+
+fn pull_catalog(manifest: &Path, base_url: &str, root: &Path) -> Result<()> {
+    let release = CatalogRelease::load(manifest)?;
+    let summary = pull_catalog_release(
+        root,
+        &release,
+        base_url,
+        std::time::Duration::from_secs(120),
+    )?;
+    println!(
+        "release_id={} downloaded={} reused={} bytes={}",
+        release.release_id, summary.downloaded, summary.reused, summary.downloaded_bytes
     );
     Ok(())
 }

@@ -52,6 +52,16 @@ svwb catalog build \
 
 manifest 必须写到 `data/` 目录之外。
 
+从公开 bucket 恢复 `data/` 工作副本：
+
+```bash
+svwb catalog pull \
+  --manifest manifest.json \
+  --root ../WBArts
+```
+
+已有且内容哈希一致的文件会跳过。下载内容的大小和 SHA-256 必须与 manifest 一致。
+
 校验现有 manifest：
 
 ```bash

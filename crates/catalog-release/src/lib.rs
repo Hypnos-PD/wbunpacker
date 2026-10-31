@@ -93,6 +93,13 @@ pub struct CatalogStageSummary {
     pub copied_bytes: u64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CatalogPullSummary {
+    pub downloaded: usize,
+    pub reused: usize,
+    pub downloaded_bytes: u64,
+}
+
 impl CatalogRelease {
     pub fn build_now(root: &Path, sources: Vec<CatalogSource>) -> Result<Self> {
         Self::build(root, sources, OffsetDateTime::now_utc())
@@ -310,6 +317,64 @@ pub fn stage(
     }
     let manifest = serde_json::to_vec_pretty(release)?;
     write_atomic(&output.join("manifest.json"), &manifest)?;
+    Ok(summary)
+}
+
+pub fn pull(
+    root: &Path,
+    release: &CatalogRelease,
+    base_url: &str,
+    timeout: std::time::Duration,
+) -> Result<CatalogPullSummary> {
+    release.validate()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("create catalog download client")?;
+    let object_base = format!("{}/objects/", base_url.trim_end_matches('/'));
+    let mut summary = CatalogPullSummary::default();
+    for file in &release.files {
+        let target = root.join(&file.path);
+        if target.is_file() {
+            let (size, sha256) = hash_file(&file.path, &target)?;
+            if size == file.size && sha256 == file.sha256 {
+                summary.reused += 1;
+                continue;
+            }
+        }
+        let url = format!("{object_base}{}", file.object);
+        let response = client
+            .get(&url)
+            .send()
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url} status"))?;
+        let mut body = Vec::with_capacity(file.size.min(8 * 1024 * 1024) as usize);
+        response
+            .take(file.size + 1)
+            .read_to_end(&mut body)
+            .with_context(|| format!("read {url}"))?;
+        if body.len() as u64 != file.size {
+            bail!(
+                "catalog object size mismatch: {} expected={} actual={}",
+                file.object,
+                file.size,
+                body.len()
+            );
+        }
+        let digest = format!("{:x}", Sha256::digest(&body));
+        if digest != file.sha256 {
+            bail!(
+                "catalog object SHA-256 mismatch: {} expected={} actual={digest}",
+                file.object,
+                file.sha256
+            );
+        }
+        write_atomic(&target, &body)?;
+        summary.downloaded += 1;
+        summary.downloaded_bytes += file.size;
+    }
     Ok(summary)
 }
 
