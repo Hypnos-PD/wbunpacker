@@ -115,10 +115,8 @@ async fn detect_profile(
         let operator = Operator::from_str(&operator).map_err(str::to_string)?;
         let profile = match operator {
             Operator::Netease => {
-                let game_root = game_root
-                    .ok_or_else(|| "Netease detection requires a game directory".to_string())?;
                 detect_netease(&NeteaseDetectorOptions {
-                    game_root: PathBuf::from(game_root),
+                    game_root: game_root.map(PathBuf::from),
                     variant,
                     timeout: std::time::Duration::from_secs(60),
                 })

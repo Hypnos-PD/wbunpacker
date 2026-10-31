@@ -58,7 +58,9 @@ Cygames：
 
 Netease：
 
-- 读取 `<game-root>/GameAssembly.dll` 的 SHA-256。
+- 读取 `<game-root>/GameAssembly.dll` 的 SHA-256。未传 `--game-root` 时依次检查
+  `SVWB_NETEASE_GAME_ROOT`、Windows `%LOCALAPPDATA%\Shadowverse`、当前 Wine
+  prefix，以及 `~/Games/*/drive_c/users/*/AppData/Local/Shadowverse`。
 - 从 `serverlist_wizard2` 读取正式服 `resVer`。
 - 从 `pc_serverlist_game` 读取客户端版本。
 - 下载 Chs manifest 并记录 SHA-256 和大小。

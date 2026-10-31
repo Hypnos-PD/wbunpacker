@@ -154,7 +154,7 @@ export default function App() {
               placeholder={
                 detectOperator === "cygames"
                   ? "留空使用 Cygames 默认目录"
-                  : "选择国服客户端安装目录"
+                  : "留空自动查找 Sevo 安装"
               }
             />
           </label>

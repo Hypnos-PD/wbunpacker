@@ -52,7 +52,9 @@ assetbundle.Chs.manifest
 
 检测结果中的 `client_headers` 为空。账号设备头、AntiCheatValue、SecretKey、UDID 和 SDK 会话不进入 RuntimeProfile。
 
-Netease 检测不要求 Linux 进程或内存读取。
+Netease 检测不要求 Linux 进程或内存读取。标准 Sevo 安装可从
+`~/Games/*/drive_c/users/*/AppData/Local/Shadowverse` 自动发现；其他位置使用
+`--game-root` 或 `SVWB_NETEASE_GAME_ROOT`。
 
 ## 对照基线
 

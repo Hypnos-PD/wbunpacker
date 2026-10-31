@@ -103,6 +103,9 @@ Netease：
 
 发布和激活是两个管理接口。Probe 成功后不会自动激活。
 
+Netease 的 active Profile 当前只作为规范元数据存档。WBMS 排行榜采集使用本机
+`svwb-cn-auth` 和公开版本接口，不读取 active Profile。
+
 ## profile_id
 
 `profile_id` 是以下字段紧凑 JSON 数组的 SHA-256，输出格式为 `sha256:<hex>`：

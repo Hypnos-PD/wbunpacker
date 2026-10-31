@@ -373,8 +373,6 @@ fn detect_profile(
 ) -> Result<()> {
     let operator = Operator::from_str(operator).map_err(anyhow::Error::msg)?;
     if operator == Operator::Netease {
-        let game_root = game_root
-            .ok_or_else(|| anyhow::anyhow!("--game-root is required for Netease detection"))?;
         let result = detect_netease(&NeteaseDetectorOptions {
             game_root,
             variant: variant.unwrap_or("Chs").into(),

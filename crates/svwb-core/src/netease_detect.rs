@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    env,
     fs::File,
     io::Read,
     path::{Path, PathBuf},
@@ -24,7 +25,7 @@ const BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct NeteaseDetectorOptions {
-    pub game_root: PathBuf,
+    pub game_root: Option<PathBuf>,
     pub variant: String,
     pub timeout: Duration,
 }
@@ -39,7 +40,8 @@ pub fn detect(options: &NeteaseDetectorOptions) -> Result<NeteaseDetection> {
     if options.variant.trim().is_empty() {
         bail!("variant is empty");
     }
-    let gameassembly = find_gameassembly(&options.game_root)?;
+    let game_root = resolve_game_root(options.game_root.as_deref())?;
+    let gameassembly = find_gameassembly(&game_root)?;
     let gameassembly_sha256 = sha256_file(&gameassembly)?;
     let client = Client::builder()
         .timeout(options.timeout)
@@ -78,6 +80,64 @@ pub fn detect(options: &NeteaseDetectorOptions) -> Result<NeteaseDetection> {
         }),
         profile,
     })
+}
+
+fn resolve_game_root(explicit: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(path) = env::var_os("SVWB_NETEASE_GAME_ROOT").map(PathBuf::from) {
+        return Ok(path);
+    }
+    let mut candidates = Vec::new();
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local_app_data).join("Shadowverse"));
+    }
+    if let Some(prefix) = env::var_os("WINEPREFIX") {
+        collect_wine_shadowverse_roots(Path::new(&prefix), &mut candidates);
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        let games = home.join("Games");
+        if let Ok(entries) = std::fs::read_dir(&games) {
+            for entry in entries.flatten() {
+                collect_wine_shadowverse_roots(&entry.path(), &mut candidates);
+            }
+        }
+    }
+    candidates = candidates
+        .into_iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    candidates.retain(|path| find_gameassembly(path).is_ok());
+    match candidates.len() {
+        0 => bail!(
+            "Netease Shadowverse install not found; pass --game-root or set SVWB_NETEASE_GAME_ROOT"
+        ),
+        1 => Ok(candidates.remove(0)),
+        _ => bail!(
+            "multiple Netease Shadowverse installs found: {}",
+            candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn collect_wine_shadowverse_roots(prefix: &Path, candidates: &mut Vec<PathBuf>) {
+    let users = prefix.join("drive_c/users");
+    let Ok(entries) = std::fs::read_dir(users) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let candidate = entry.path().join("AppData/Local/Shadowverse");
+        if candidate.is_dir() {
+            candidates.push(candidate);
+        }
+    }
 }
 
 fn find_gameassembly(root: &Path) -> Result<PathBuf> {
