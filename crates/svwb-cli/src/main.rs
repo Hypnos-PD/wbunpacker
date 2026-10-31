@@ -22,6 +22,8 @@ use svwb_core::{
     },
 };
 
+mod pipeline;
+
 #[derive(Parser)]
 #[command(name = "svwb", version, about = "SVWB data and protocol toolkit")]
 struct Cli {
@@ -58,6 +60,11 @@ enum Command {
     Catalog {
         #[command(subcommand)]
         command: CatalogCommand,
+    },
+    /// Validate and execute declarative data pipelines
+    Pipeline {
+        #[command(subcommand)]
+        command: PipelineCommand,
     },
 }
 
@@ -247,6 +254,37 @@ enum CatalogCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum PipelineCommand {
+    /// Validate a pipeline manifest
+    Check {
+        #[arg(long, default_value = "pipeline.toml")]
+        file: PathBuf,
+    },
+    /// List steps in dependency order
+    List {
+        #[arg(long, default_value = "pipeline.toml")]
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Execute pipeline steps
+    Run {
+        #[arg(long, default_value = "pipeline.toml")]
+        file: PathBuf,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long = "only")]
+        only: Vec<String>,
+        #[arg(long = "skip")]
+        skip: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        continue_on_error: bool,
+    },
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -361,6 +399,95 @@ fn run() -> Result<()> {
                 root,
             } => pull_catalog(&manifest, &base_url, &root),
         },
+        Command::Pipeline { command } => match command {
+            PipelineCommand::Check { file } => check_pipeline(&file),
+            PipelineCommand::List { file, json } => list_pipeline(&file, json),
+            PipelineCommand::Run {
+                file,
+                from,
+                only,
+                skip,
+                dry_run,
+                continue_on_error,
+            } => run_pipeline(
+                &file,
+                from.as_deref(),
+                &only,
+                &skip,
+                dry_run,
+                continue_on_error,
+            ),
+        },
+    }
+}
+
+fn check_pipeline(file: &Path) -> Result<()> {
+    let pipeline = pipeline::Pipeline::load(file)?;
+    let ordered = pipeline.topological()?;
+    println!(
+        "valid pipeline: {} steps, {}",
+        ordered.len(),
+        file.display()
+    );
+    Ok(())
+}
+
+fn list_pipeline(file: &Path, json: bool) -> Result<()> {
+    let pipeline = pipeline::Pipeline::load(file)?;
+    let context = pipeline.context(file)?;
+    let steps = pipeline.topological()?;
+    let planned = pipeline.plan(&context, &steps)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&planned)?);
+    } else {
+        for step in planned {
+            println!(
+                "{:<28} {:<48} depends={} cwd={}",
+                step.id,
+                step.description,
+                if step.depends_on.is_empty() {
+                    "-".into()
+                } else {
+                    step.depends_on.join(",")
+                },
+                step.cwd
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_pipeline(
+    file: &Path,
+    from: Option<&str>,
+    only: &[String],
+    skip: &[String],
+    dry_run: bool,
+    continue_on_error: bool,
+) -> Result<()> {
+    let pipeline = pipeline::Pipeline::load(file)?;
+    let context = pipeline.context(file)?;
+    let selected = pipeline.select(from, only, skip)?;
+    if selected.is_empty() {
+        bail!("pipeline selection is empty");
+    }
+    let mut failures = Vec::new();
+    for step in selected {
+        if let Err(error) = context.run_step(&pipeline, step, dry_run) {
+            if !continue_on_error {
+                return Err(error);
+            }
+            eprintln!("pipeline step {} failed: {error:#}", step.id);
+            failures.push(step.id.clone());
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "pipeline finished with failed steps: {}",
+            failures.join(", ")
+        )
     }
 }
 

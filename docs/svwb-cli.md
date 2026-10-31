@@ -22,6 +22,9 @@ svwb catalog diff --old <manifest.json> --new <manifest.json> [--json]
 svwb catalog stage --root <path> --manifest <manifest.json> --output <dir> [--previous <manifest.json>]
 svwb catalog pointer --manifest <manifest.json> --output <latest.json>
 svwb catalog pull --manifest <manifest.json> --root <path> [--base-url URL]
+svwb pipeline check [--file pipeline.toml]
+svwb pipeline list [--file pipeline.toml] [--json]
+svwb pipeline run [--file pipeline.toml] [--from STEP] [--only STEP]... [--skip STEP]... [--dry-run]
 ```
 
 ## doctor
@@ -86,3 +89,18 @@ Netease：
 
 `catalog` 生成、校验和比较 WBU CatalogRelease。发布范围、排除目录和
 `release_id` 算法见 [catalog-release.md](catalog-release.md)。
+
+## pipeline
+
+`pipeline` 读取声明式 TOML，校验步骤 ID、未知依赖和依赖环，再按拓扑顺序执行。
+
+- `${PROJECT_ROOT}` 指向 pipeline 文件所在目录。
+- `${NAME}` 从进程环境或 `env_file` 读取；缺失变量直接失败。
+- `depends_on` 声明前置步骤。
+- `--from` 执行该步骤及其后的步骤。
+- `--only` 可重复，执行指定步骤及其依赖。
+- `--skip` 可重复，从最终选择中移除步骤。
+- `--dry-run` 输出展开后的工作目录、环境变量名和命令，不执行。
+
+示例见 [pipeline.example.toml](pipeline.example.toml)，结构契约见
+`contracts/pipeline.schema.json`。

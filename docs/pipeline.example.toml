@@ -1,0 +1,32 @@
+version = 1
+env_file = ".env"
+
+[defaults]
+cwd = "${PROJECT_ROOT}"
+
+[[steps]]
+id = "extract"
+description = "导出游戏主数据"
+command = ["${WBU_EXE}", "master", "-v", "all"]
+cwd = "${WBA_UNPACKER_ROOT}"
+optional_args = [
+  { when_env = "WBU_VERSION", args = ["-V", "${WBU_VERSION}"] },
+]
+
+[[steps]]
+id = "derive"
+description = "生成站点卡表"
+command = ["node", "${PROJECT_ROOT}/scripts/build-home-catalog.mjs"]
+depends_on = ["extract"]
+
+[[steps]]
+id = "catalog_prepare"
+description = "准备 CatalogRelease"
+command = ["node", "${PROJECT_ROOT}/scripts/catalog-release.mjs", "prepare"]
+depends_on = ["derive"]
+
+[[steps]]
+id = "catalog_publish"
+description = "发布 CatalogRelease"
+command = ["node", "${PROJECT_ROOT}/scripts/catalog-release.mjs", "upload"]
+depends_on = ["catalog_prepare"]
