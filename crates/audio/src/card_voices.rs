@@ -329,7 +329,7 @@ fn lbl(chs: &str, eng: &str, jpn: &str, kor: &str, cht: &str) -> SlotLabel {
 // ============================================================================
 
 /// 槽位多语言标签
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SlotLabel {
     pub chs: String,
     pub eng: String,
@@ -339,7 +339,7 @@ pub struct SlotLabel {
 }
 
 /// voice_index.json 的顶层结构
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VoiceIndex {
     pub labels: BTreeMap<String, SlotLabel>,
     /// cards[lang][prefix][slot] = "eng/10001110/play.mp3"
@@ -403,7 +403,8 @@ pub fn build_voice_map(
                         let suffix = evt
                             .strip_prefix(&format!("Play_dx_{}_", prefix))
                             .unwrap_or(evt);
-                        let slot = classify_play_suffix(suffix);
+                        let (suffix, random) = split_random_suffix(suffix);
+                        let slot = with_random_variant(classify_play_suffix(suffix), random);
                         slots.entry(slot).or_default().push(evt.clone());
                     }
                 }
@@ -412,17 +413,23 @@ pub fn build_voice_map(
                         let suffix = evt
                             .strip_prefix(&format!("Play_dx_{}_", prefix))
                             .unwrap_or(evt);
-                        let slot = classify_evolve_suffix(suffix);
+                        let (suffix, random) = split_random_suffix(suffix);
+                        let slot = with_random_variant(classify_evolve_suffix(suffix), random);
                         slots.entry(slot).or_default().push(evt.clone());
                     }
                 }
                 "skill" => {
                     for evt in &events {
-                        let slot = if evt.contains("_evo") {
+                        let suffix = evt
+                            .strip_prefix(&format!("Play_dx_{}_", prefix))
+                            .unwrap_or(evt);
+                        let (suffix, random) = split_random_suffix(suffix);
+                        let slot = if suffix.contains("_evo") {
                             "evo_skill".to_string()
                         } else {
                             "skill".to_string()
                         };
+                        let slot = with_random_variant(slot, random);
                         slots.entry(slot).or_default().push(evt.clone());
                     }
                 }
@@ -431,15 +438,20 @@ pub fn build_voice_map(
                         let suffix = evt
                             .strip_prefix(&format!("Play_dx_{}_", prefix))
                             .unwrap_or(evt);
-                        let slot = classify_act_suffix(suffix);
+                        let (suffix, random) = split_random_suffix(suffix);
+                        let slot = with_random_variant(classify_act_suffix(suffix), random);
                         slots.entry(slot).or_default().push(evt.clone());
                     }
                 }
                 _ => {
-                    slots
-                        .entry(base_slot.to_string())
-                        .or_default()
-                        .extend(events.clone());
+                    for evt in &events {
+                        let suffix = evt
+                            .strip_prefix(&format!("Play_dx_{}_", prefix))
+                            .unwrap_or(evt);
+                        let (_, random) = split_random_suffix(suffix);
+                        let slot = with_random_variant(base_slot.to_string(), random);
+                        slots.entry(slot).or_default().push(evt.clone());
+                    }
                 }
             }
         }
@@ -473,6 +485,7 @@ pub fn extract_card_voices(
     vgmstream_path: &Path,
     ffmpeg_path: &str,
     force: bool,
+    prefix_filter: Option<&str>,
 ) -> anyhow::Result<CardVoiceStats> {
     let voice_map = build_voice_map(card_resource_path)?;
     let event_table = crate::wwise::decrypt_wwise_event_table(mapping_data)
@@ -481,18 +494,31 @@ pub fn extract_card_voices(
     println!("CardResourceMaster: {} 个声音前缀", voice_map.len());
 
     let mut stats = CardVoiceStats::default();
-    let mut voice_index = VoiceIndex {
-        labels: BTreeMap::new(),
-        cards: BTreeMap::new(),
+    let index_path = output_dir.join("voice_index.json");
+    let mut voice_index = if prefix_filter.is_some() && index_path.exists() {
+        serde_json::from_str::<VoiceIndex>(
+            &std::fs::read_to_string(&index_path)
+                .with_context(|| format!("无法读取 {}", index_path.display()))?,
+        )
+        .with_context(|| format!("无法解析 {}", index_path.display()))?
+    } else {
+        VoiceIndex {
+            labels: BTreeMap::new(),
+            cards: BTreeMap::new(),
+        }
     };
 
     let mut all_slots: HashSet<String> = HashSet::new();
+    let prefixes: Vec<(&String, &BTreeMap<String, Vec<String>>)> = voice_map
+        .iter()
+        .filter(|(prefix, _)| prefix_filter.is_none_or(|filter| prefix.as_str() == filter))
+        .collect();
 
     for &(lang, lang_dir) in LANG_DIRS {
         println!("\n=== {} ({}) ===", lang, lang_dir);
 
         let pck_dir = pck_root.join("Windows").join("d").join(lang_dir);
-        let prefix_count = voice_map.len();
+        let prefix_count = prefixes.len();
         let pb = ProgressBar::new(prefix_count as u64);
         pb.set_style(
             ProgressStyle::with_template("{spinner} [{bar:30}] {pos}/{len} {msg}")
@@ -500,9 +526,9 @@ pub fn extract_card_voices(
                 .progress_chars("=> "),
         );
 
-        let mut lang_cards: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        let mut lang_cards = voice_index.cards.remove(lang).unwrap_or_default();
 
-        for (prefix, slots) in &voice_map {
+        for &(prefix, slots) in &prefixes {
             pb.set_message(prefix.to_string());
 
             let pck_path = pck_dir.join(format!("dx_{}.pck", prefix));
@@ -558,7 +584,6 @@ pub fn extract_card_voices(
             .insert(slot.clone(), make_slot_label(slot, &base_labels));
     }
 
-    let index_path = output_dir.join("voice_index.json");
     let json = serde_json::to_string_pretty(&voice_index)?;
     std::fs::write(&index_path, json)?;
     println!("\nvoice_index.json → {}", index_path.display());
@@ -749,7 +774,6 @@ fn classify_play_suffix(suffix: &str) -> String {
     if let Some(rest) = suffix.strip_prefix("1_mode") {
         return format!("play_mode{rest}");
     }
-
     // 静态规则
     for &(key, slot) in PLAY_SUFFIX_RULES {
         if suffix == key || suffix.starts_with(key) {
@@ -815,6 +839,12 @@ fn make_slot_label(slot: &str, base_labels: &BTreeMap<&'static str, SlotLabel>) 
         return lbl.clone();
     }
 
+    if let Some((base_slot, number)) = split_random_slot(slot)
+        && let Some(base) = base_labels.get(base_slot)
+    {
+        return random_label(base, number);
+    }
+
     // 尝试匹配变体 slot: play_pair_10721110 → base="play_pair", suffix="10721110"
     for (base, _) in SLOT_ORDER {
         if slot.starts_with(base)
@@ -842,6 +872,40 @@ fn make_slot_label(slot: &str, base_labels: &BTreeMap<&'static str, SlotLabel>) 
         jpn: slot.to_string(),
         kor: slot.to_string(),
         cht: slot.to_string(),
+    }
+}
+
+fn split_random_suffix(suffix: &str) -> (&str, Option<&str>) {
+    let Some(index) = suffix.rfind("_random") else {
+        return (suffix, None);
+    };
+    let number = &suffix[index + "_random".len()..];
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return (suffix, None);
+    }
+    (&suffix[..index], Some(number))
+}
+
+fn with_random_variant(slot: String, number: Option<&str>) -> String {
+    number.map_or(slot.clone(), |number| format!("{slot}_random{number}"))
+}
+
+fn split_random_slot(slot: &str) -> Option<(&str, &str)> {
+    let index = slot.rfind("_random")?;
+    let number = &slot[index + "_random".len()..];
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((&slot[..index], number))
+}
+
+fn random_label(base: &SlotLabel, number: &str) -> SlotLabel {
+    SlotLabel {
+        chs: format!("{}·随机{}", base.chs, number),
+        eng: format!("{}·Random {}", base.eng, number),
+        jpn: format!("{}・ランダム{}", base.jpn, number),
+        kor: format!("{}·랜덤 {}", base.kor, number),
+        cht: format!("{}·隨機{}", base.cht, number),
     }
 }
 
@@ -939,6 +1003,44 @@ mod tests {
         assert!(!slots.contains_key("evolve"));
         assert!(!slots.contains_key("super_evolve"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn random_play_variants_keep_separate_slots() {
+        for number in ["1", "2", "3"] {
+            let suffix = format!("1_random{number}");
+            let (base, random) = split_random_suffix(&suffix);
+            assert_eq!(
+                with_random_variant(classify_play_suffix(base), random),
+                format!("play_random{number}")
+            );
+        }
+        assert_eq!(classify_play_suffix("1"), "play");
+    }
+
+    #[test]
+    fn random_suffix_is_generic_across_voice_columns() -> anyhow::Result<()> {
+        let mut row = vec![json!(""); 53];
+        row[38] = json!("dx_10001110");
+        row[39] = json!("Play_dx_10001110_1_random1,Play_dx_10001110_1_random2");
+        row[41] = json!("Play_dx_10001110_2_random1");
+        row[43] = json!("Play_dx_10001110_3_sp_random1");
+        row[48] = json!("Play_dx_10001110_5_evo_random1");
+        row[50] = json!("Play_dx_10001110_10_random1");
+
+        let temp_dir = tempfile::tempdir()?;
+        let table_path = temp_dir.path().join("CardResourceMaster.json");
+        std::fs::write(&table_path, serde_json::to_vec(&vec![row])?)?;
+        let voice_map = build_voice_map(&table_path)?;
+        let slots = voice_map.get("10001110").context("voice map")?;
+
+        assert!(slots.contains_key("play_random1"));
+        assert!(slots.contains_key("play_random2"));
+        assert!(slots.contains_key("attack_random1"));
+        assert!(slots.contains_key("super_evolve_random1"));
+        assert!(slots.contains_key("evo_skill_random1"));
+        assert!(slots.contains_key("act_random1"));
         Ok(())
     }
 }

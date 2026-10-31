@@ -190,6 +190,9 @@ enum AudioCmd {
         /// 覆盖已存在的卡牌语音 MP3
         #[arg(short = 'F', long)]
         force: bool,
+        /// 只重抽一个声音前缀，并合并回现有 voice_index.json
+        #[arg(long)]
+        prefix: Option<String>,
     },
     /// 提取 LeaderSkin detail 语音: Play_dx_dtl_{id}_{animation}_{option}
     LeaderSkin,
@@ -1688,7 +1691,7 @@ async fn main() -> anyhow::Result<()> {
             let data_dir = std::path::Path::new(&cfg.data_dir);
             let vgmstream_path = std::path::Path::new(&cfg.vgmstream_path);
             match sub {
-                Some(AudioCmd::Card { force }) => {
+                Some(AudioCmd::Card { force, prefix }) => {
                     let variant = "Chs";
                     let card_resource_path = data_dir
                         .join("exports")
@@ -1722,6 +1725,7 @@ async fn main() -> anyhow::Result<()> {
                         vgmstream_path,
                         &cfg.ffmpeg_path,
                         force,
+                        prefix.as_deref(),
                     )?;
                     println!(
                         "\n卡牌语音提取完成: {} 张卡, {} 个 MP3 (跳过: {})",
