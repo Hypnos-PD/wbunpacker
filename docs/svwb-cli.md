@@ -104,5 +104,17 @@ Netease：
 - `--skip` 可重复，从最终选择中移除步骤。
 - `--dry-run` 输出展开后的工作目录、环境变量名和命令，不执行。
 
+`[groups]` 必须声明 `data`、`media`、`site`、`catalog`，且每个步骤只能属于一个组。
+稳定入口按组校验后复用同一条管线：
+
+```bash
+svwb data manifest --file pipeline.toml
+svwb media cardvoice --file pipeline.toml
+svwb site card_catalog --file pipeline.toml
+svwb catalog run catalog_publish --file pipeline.toml
+```
+
+所选步骤的依赖会自动加入；所选步骤不属于目标组时直接失败。
+
 示例见 [pipeline.example.toml](pipeline.example.toml)，结构契约见
 `contracts/pipeline.schema.json`。

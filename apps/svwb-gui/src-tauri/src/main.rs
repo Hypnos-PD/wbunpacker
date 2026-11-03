@@ -1,8 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{path::PathBuf, str::FromStr};
+use std::{
+    io::{BufRead, BufReader},
+    path::PathBuf,
+    process::{Command, Stdio},
+    str::FromStr,
+};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use svwb_core::{
     Operator, RuntimeProbe, RuntimeProfile,
     credential::{CredentialSummary, inspect_cygames_systemd, inspect_netease_auth},
@@ -14,6 +19,7 @@ use svwb_core::{
         publish_runtime_profile,
     },
 };
+use tauri::Emitter;
 
 #[derive(Serialize)]
 struct ValidationReport {
@@ -21,6 +27,157 @@ struct ValidationReport {
     file: String,
     operator: String,
     issues: Vec<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct PipelineStepInfo {
+    id: String,
+    group: String,
+    description: String,
+    command: Vec<String>,
+    cwd: String,
+    depends_on: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PipelineCommandResult {
+    success: bool,
+    code: Option<i32>,
+}
+
+#[derive(Clone, Serialize)]
+struct PipelineOutputEvent {
+    stream: String,
+    line: String,
+}
+
+fn svwb_executable(configured: Option<String>) -> String {
+    configured
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("SVWB_EXE").ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "svwb".into())
+}
+
+fn command_failure(exe: &str, output: std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("{exe} exited with {}", output.status)
+    }
+}
+
+#[tauri::command]
+async fn pipeline_list(
+    file: String,
+    executable: Option<String>,
+) -> Result<Vec<PipelineStepInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let exe = svwb_executable(executable);
+        let output = Command::new(&exe)
+            .args(["pipeline", "list", "--file", &file, "--json"])
+            .output()
+            .map_err(|error| format!("run {exe}: {error}"))?;
+        if !output.status.success() {
+            return Err(command_failure(&exe, output));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn pipeline_check(file: String, executable: Option<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let exe = svwb_executable(executable);
+        let output = Command::new(&exe)
+            .args(["pipeline", "check", "--file", &file])
+            .output()
+            .map_err(|error| format!("run {exe}: {error}"))?;
+        if !output.status.success() {
+            return Err(command_failure(&exe, output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn pipeline_run(
+    app: tauri::AppHandle,
+    file: String,
+    executable: Option<String>,
+    only: Vec<String>,
+    dry_run: bool,
+    continue_on_error: bool,
+) -> Result<PipelineCommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if only.is_empty() {
+            return Err("select at least one pipeline step".into());
+        }
+        let exe = svwb_executable(executable);
+        let mut command = Command::new(&exe);
+        command.args(["pipeline", "run", "--file", &file]);
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        if continue_on_error {
+            command.arg("--continue-on-error");
+        }
+        for id in &only {
+            command.args(["--only", id]);
+        }
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("run {exe}: {error}"))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_app = app.clone();
+        let stdout_thread = std::thread::spawn(move || {
+            if let Some(stdout) = stdout {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    let _ = stdout_app.emit(
+                        "pipeline-output",
+                        PipelineOutputEvent {
+                            stream: "stdout".into(),
+                            line,
+                        },
+                    );
+                }
+            }
+        });
+        let stderr_app = app;
+        let stderr_thread = std::thread::spawn(move || {
+            if let Some(stderr) = stderr {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    let _ = stderr_app.emit(
+                        "pipeline-output",
+                        PipelineOutputEvent {
+                            stream: "stderr".into(),
+                            line,
+                        },
+                    );
+                }
+            }
+        });
+        let status = child.wait().map_err(|error| error.to_string())?;
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        Ok(PipelineCommandResult {
+            success: status.success(),
+            code: status.code(),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -192,7 +349,10 @@ fn main() {
             probe_profile,
             publish_profile,
             activate_profile,
-            detect_profile
+            detect_profile,
+            pipeline_list,
+            pipeline_check,
+            pipeline_run
         ])
         .run(tauri::generate_context!())
         .expect("svwb-gui runtime error");

@@ -1,5 +1,6 @@
-import {useState} from "react";
+import {useEffect, useState} from "react";
 import {invoke} from "@tauri-apps/api/core";
+import {listen} from "@tauri-apps/api/event";
 
 type Check = {
   name: string;
@@ -51,6 +52,25 @@ type DetectionResult = {
   profile_path: string;
 };
 
+type PipelineStep = {
+  id: string;
+  group: string;
+  description: string;
+  command: string[];
+  cwd: string;
+  depends_on: string[];
+};
+
+type PipelineCommandResult = {
+  success: boolean;
+  code: number | null;
+};
+
+type PipelineOutputEvent = {
+  stream: "stdout" | "stderr";
+  line: string;
+};
+
 export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -71,6 +91,22 @@ export default function App() {
   const [tokenPath, setTokenPath] = useState("");
   const [probe, setProbe] = useState<RuntimeProbe | null>(null);
   const [published, setPublished] = useState<PublishResult | null>(null);
+  const [pipelineFile, setPipelineFile] = useState("pipeline.toml");
+  const [svwbExecutable, setSvwbExecutable] = useState("svwb");
+  const [pipelineSteps, setPipelineSteps] = useState<PipelineStep[]>([]);
+  const [selectedSteps, setSelectedSteps] = useState<string[]>([]);
+  const [pipelineLog, setPipelineLog] = useState("");
+  const [pipelineResult, setPipelineResult] = useState("");
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<PipelineOutputEvent>("pipeline-output", event => {
+      setPipelineLog(current => `${current}${event.payload.stream === "stderr" ? "! " : ""}${event.payload.line}\n`);
+    }).then(dispose => {
+      unlisten = dispose;
+    });
+    return () => unlisten?.();
+  }, []);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -82,6 +118,50 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function loadPipelineSteps() {
+    await run(async () => {
+      const steps = await invoke<PipelineStep[]>("pipeline_list", {
+        file: pipelineFile,
+        executable: svwbExecutable || null
+      });
+      setPipelineSteps(steps);
+      setSelectedSteps(current => current.filter(id => steps.some(step => step.id === id)));
+      setPipelineResult(`已读取 ${steps.length} 个步骤`);
+    });
+  }
+
+  async function checkPipeline() {
+    await run(async () => setPipelineResult(
+      await invoke<string>("pipeline_check", {
+        file: pipelineFile,
+        executable: svwbExecutable || null
+      })
+    ));
+  }
+
+  async function executePipeline(dryRun: boolean) {
+    await run(async () => {
+      setPipelineLog("");
+      setPipelineResult(dryRun ? "Dry Run 执行中" : "管线执行中");
+      const result = await invoke<PipelineCommandResult>("pipeline_run", {
+        file: pipelineFile,
+        executable: svwbExecutable || null,
+        only: selectedSteps,
+        dryRun,
+        continueOnError: false
+      });
+      setPipelineResult(result.success
+        ? (dryRun ? "Dry Run 完成" : "管线执行完成")
+        : `执行失败，退出码 ${result.code ?? "unknown"}`);
+    });
+  }
+
+  function toggleStep(id: string) {
+    setSelectedSteps(current => current.includes(id)
+      ? current.filter(value => value !== id)
+      : [...current, id]);
   }
 
   return (
@@ -101,6 +181,64 @@ export default function App() {
           {error}
         </p>
       )}
+
+      <section className="panel">
+        <div className="panel-title">
+          <h2>数据管线</h2>
+          <span className="meta">直接调用 svwb pipeline</span>
+        </div>
+        <div className="row">
+          <label className="grow">
+            pipeline.toml
+            <input value={pipelineFile} onChange={event => setPipelineFile(event.target.value)} />
+          </label>
+          <label>
+            svwb
+            <input value={svwbExecutable} onChange={event => setSvwbExecutable(event.target.value)} />
+          </label>
+        </div>
+        <div className="row">
+          <button disabled={busy || !pipelineFile} onClick={() => void checkPipeline()}>
+            校验清单
+          </button>
+          <button disabled={busy || !pipelineFile} onClick={() => void loadPipelineSteps()}>
+            读取步骤
+          </button>
+          <button
+            disabled={busy || selectedSteps.length === 0}
+            onClick={() => void executePipeline(true)}
+          >
+            Dry Run 所选
+          </button>
+          <button
+            disabled={busy || selectedSteps.length === 0}
+            onClick={() => void executePipeline(false)}
+          >
+            运行所选
+          </button>
+        </div>
+        <p className="meta">所选步骤会自动包含其依赖，执行顺序以 pipeline.toml 为准。</p>
+        {pipelineSteps.length > 0 && (
+          <div className="pipeline-steps">
+            {pipelineSteps.map(step => (
+              <label className="pipeline-step" key={step.id}>
+                <input
+                  type="checkbox"
+                  checked={selectedSteps.includes(step.id)}
+                  onChange={() => toggleStep(step.id)}
+                />
+                <span>
+                  <strong>{step.group} / {step.id}</strong>
+                  <small>{step.description}</small>
+                  <small>依赖：{step.depends_on.length ? step.depends_on.join(", ") : "无"}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+        {pipelineResult && <p className="pipeline-result">{pipelineResult}</p>}
+        {pipelineLog && <pre className="pipeline-log">{pipelineLog}</pre>}
+      </section>
 
       <section className="panel">
         <div className="panel-title">

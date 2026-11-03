@@ -8,7 +8,7 @@ use catalog_release::{
     CatalogDiff, CatalogRelease, CatalogSource, pull as pull_catalog_release,
     stage as stage_catalog_release,
 };
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use svwb_core::{
     Operator, RuntimeProbe, RuntimeProbeStatus, RuntimeProfile,
     credential::{inspect_cygames_systemd, inspect_netease_auth},
@@ -66,6 +66,12 @@ enum Command {
         #[command(subcommand)]
         command: PipelineCommand,
     },
+    /// Run pipeline steps assigned to the data group
+    Data(PipelineGroupArgs),
+    /// Run pipeline steps assigned to the media group
+    Media(PipelineGroupArgs),
+    /// Run pipeline steps assigned to the site group
+    Site(PipelineGroupArgs),
     /// Run the configured WBU executable through the unified CLI
     Wbu {
         #[arg(
@@ -205,6 +211,8 @@ enum ProbeCommand {
 
 #[derive(Subcommand)]
 enum CatalogCommand {
+    /// Run pipeline steps assigned to the catalog group
+    Run(PipelineGroupArgs),
     /// Build a content-addressed catalog release manifest
     Build {
         #[arg(long, default_value = ".")]
@@ -261,6 +269,19 @@ enum CatalogCommand {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
+}
+
+#[derive(Args)]
+struct PipelineGroupArgs {
+    #[arg(long, default_value = "pipeline.toml")]
+    file: PathBuf,
+    /// Pipeline step IDs to run; dependencies are included automatically
+    #[arg(value_name = "STEP", required = true)]
+    steps: Vec<String>,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    continue_on_error: bool,
 }
 
 #[derive(Subcommand)]
@@ -383,6 +404,7 @@ fn run() -> Result<()> {
             ProbeCommand::Validate { file, json } => validate_probe(&file, json),
         },
         Command::Catalog { command } => match command {
+            CatalogCommand::Run(args) => run_pipeline_group("catalog", args),
             CatalogCommand::Build {
                 root,
                 output,
@@ -427,8 +449,29 @@ fn run() -> Result<()> {
                 continue_on_error,
             ),
         },
+        Command::Data(args) => run_pipeline_group("data", args),
+        Command::Media(args) => run_pipeline_group("media", args),
+        Command::Site(args) => run_pipeline_group("site", args),
         Command::Wbu { args } => run_wbu(&args),
     }
+}
+
+fn run_pipeline_group(group: &str, args: PipelineGroupArgs) -> Result<()> {
+    let pipeline = pipeline::Pipeline::load(&args.file)?;
+    let members = pipeline.group(group)?;
+    for step in &args.steps {
+        if !members.iter().any(|member| member == step) {
+            bail!("step {step} does not belong to pipeline group {group}");
+        }
+    }
+    run_pipeline(
+        &args.file,
+        None,
+        &args.steps,
+        &[],
+        args.dry_run,
+        args.continue_on_error,
+    )
 }
 
 fn run_wbu(args: &[String]) -> Result<()> {

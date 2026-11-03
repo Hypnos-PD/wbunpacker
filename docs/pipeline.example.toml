@@ -4,6 +4,12 @@ env_file = ".env"
 [defaults]
 cwd = "${PROJECT_ROOT}"
 
+[groups]
+data = ["extract"]
+media = []
+site = ["derive"]
+catalog = ["catalog_prepare", "catalog_publish"]
+
 [[steps]]
 id = "extract"
 description = "导出游戏主数据"

@@ -15,6 +15,8 @@ pub struct Pipeline {
     #[serde(default)]
     pub defaults: PipelineDefaults,
     #[serde(default)]
+    pub groups: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     pub steps: Vec<PipelineStep>,
 }
 
@@ -51,6 +53,7 @@ pub struct OptionalArgs {
 #[derive(Debug, Clone, Serialize)]
 pub struct PlannedStep {
     pub id: String,
+    pub group: String,
     pub description: String,
     pub command: Vec<String>,
     pub cwd: String,
@@ -92,8 +95,49 @@ impl Pipeline {
                 }
             }
         }
+        for group in ["data", "media", "site", "catalog"] {
+            if !self.groups.contains_key(group) {
+                bail!("pipeline group {group} is missing");
+            }
+        }
+        if let Some(group) = self
+            .groups
+            .keys()
+            .find(|group| !["data", "media", "site", "catalog"].contains(&group.as_str()))
+        {
+            bail!("unknown pipeline group {group}");
+        }
+        let mut grouped = HashSet::new();
+        for (group, ids) in &self.groups {
+            let mut seen = HashSet::new();
+            for id in ids {
+                if !known.contains(id.as_str()) {
+                    bail!("pipeline group {group} references unknown step {id}");
+                }
+                if !seen.insert(id.as_str()) {
+                    bail!("pipeline step {id} is duplicated in group {group}");
+                }
+                if !grouped.insert(id.as_str()) {
+                    bail!("pipeline step {id} belongs to more than one group");
+                }
+            }
+        }
+        if let Some(step) = self
+            .steps
+            .iter()
+            .find(|step| !grouped.contains(step.id.as_str()))
+        {
+            bail!("pipeline step {} is not assigned to a group", step.id);
+        }
         self.topological()?;
         Ok(())
+    }
+
+    pub fn group(&self, name: &str) -> Result<&[String]> {
+        self.groups
+            .get(name)
+            .map(Vec::as_slice)
+            .with_context(|| format!("unknown pipeline group {name}"))
     }
 
     pub fn topological(&self) -> Result<Vec<&PipelineStep>> {
@@ -247,8 +291,15 @@ impl Pipeline {
                         .unwrap_or("${PROJECT_ROOT}"),
                     &context.variables,
                 )?;
+                let group = self
+                    .groups
+                    .iter()
+                    .find(|(_, ids)| ids.iter().any(|id| id == &step.id))
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_default();
                 Ok(PlannedStep {
                     id: step.id.clone(),
+                    group,
                     description: step.description.clone(),
                     command,
                     cwd,
@@ -398,6 +449,12 @@ version = 1
 [defaults]
 cwd = "${PROJECT_ROOT}"
 
+[groups]
+data = ["extract"]
+media = []
+site = ["derive"]
+catalog = ["publish"]
+
 [[steps]]
 id = "extract"
 description = "extract"
@@ -505,6 +562,27 @@ optional_args = [{when_env = "DRY_RUN", args = ["--dry-run"]}]
                 .map(|step| step.id.as_str())
                 .collect::<Vec<_>>(),
             ["derive", "publish"]
+        );
+    }
+
+    #[test]
+    fn validates_group_membership() {
+        let valid = pipeline();
+        assert_eq!(valid.group("data").unwrap(), ["extract"]);
+        assert_eq!(valid.group("catalog").unwrap(), ["publish"]);
+
+        let mut invalid = pipeline();
+        invalid
+            .groups
+            .get_mut("site")
+            .unwrap()
+            .push("missing".into());
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown step missing")
         );
     }
 }

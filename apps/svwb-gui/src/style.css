@@ -164,6 +164,71 @@ label {
   color: #222;
 }
 
+.pipeline-steps {
+  display: grid;
+  max-height: 360px;
+  overflow: auto;
+  border: 2px solid #111;
+  background: #f7f7f7;
+}
+
+.pipeline-step {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  align-items: start;
+  gap: 9px;
+  padding: 9px 11px;
+  border-bottom: 1px solid #ccc;
+  color: #111;
+}
+
+.pipeline-step:last-child {
+  border-bottom: 0;
+}
+
+.pipeline-step input {
+  width: 18px;
+  min-height: 18px;
+  margin-top: 2px;
+  padding: 0;
+  accent-color: #a8c900;
+}
+
+.pipeline-step span {
+  display: grid;
+  gap: 3px;
+}
+
+.pipeline-step strong {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.pipeline-step small {
+  color: #666;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.pipeline-result {
+  padding: 8px 10px;
+  border-left: 5px solid #a8c900;
+  background: #f5f8e6;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.pipeline-log {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  background: #111;
+  color: #e9e9e9;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 640px) {
   .row,
   .panel-title {
