@@ -3,7 +3,7 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use catalog_release::{
     CatalogDiff, CatalogRelease, CatalogSource, pull as pull_catalog_release,
     stage as stage_catalog_release,
@@ -65,6 +65,15 @@ enum Command {
     Pipeline {
         #[command(subcommand)]
         command: PipelineCommand,
+    },
+    /// Run the configured WBU executable through the unified CLI
+    Wbu {
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<String>,
     },
 }
 
@@ -418,7 +427,27 @@ fn run() -> Result<()> {
                 continue_on_error,
             ),
         },
+        Command::Wbu { args } => run_wbu(&args),
     }
+}
+
+fn run_wbu(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        bail!("wbu arguments are required");
+    }
+    let executable = std::env::var_os("WBU_EXE").filter(|value| !value.is_empty());
+    let executable = executable
+        .as_deref()
+        .map(Path::new)
+        .ok_or_else(|| anyhow::anyhow!("WBU_EXE is not configured"))?;
+    let status = std::process::Command::new(executable)
+        .args(args)
+        .status()
+        .with_context(|| format!("run {}", executable.display()))?;
+    if !status.success() {
+        bail!("wbu exited with {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
 }
 
 fn check_pipeline(file: &Path) -> Result<()> {

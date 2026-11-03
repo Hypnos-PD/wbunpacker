@@ -96,6 +96,8 @@ Netease：
 
 - `${PROJECT_ROOT}` 指向 pipeline 文件所在目录。
 - `${NAME}` 从进程环境或 `env_file` 读取；缺失变量直接失败。
+- `env_file` 中的变量同时传入子进程；`defaults.env` 和步骤的 `env` 优先。
+- `${SVWB_EXE}` 自动指向当前运行的 `svwb`；WBU 步骤通过 `svwb wbu ...` 执行。
 - `depends_on` 声明前置步骤。
 - `--from` 执行该步骤及其后的步骤。
 - `--only` 可重复，执行指定步骤及其依赖。

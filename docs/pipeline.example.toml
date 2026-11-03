@@ -7,7 +7,7 @@ cwd = "${PROJECT_ROOT}"
 [[steps]]
 id = "extract"
 description = "导出游戏主数据"
-command = ["${WBU_EXE}", "master", "-v", "all"]
+command = ["${SVWB_EXE}", "wbu", "master", "-v", "all"]
 cwd = "${WBA_UNPACKER_ROOT}"
 optional_args = [
   { when_env = "WBU_VERSION", args = ["-V", "${WBU_VERSION}"] },

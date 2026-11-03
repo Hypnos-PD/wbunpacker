@@ -59,6 +59,7 @@ pub struct PlannedStep {
 
 pub struct PipelineContext {
     variables: BTreeMap<String, String>,
+    file_variables: HashSet<String>,
 }
 
 impl Pipeline {
@@ -208,15 +209,23 @@ impl Pipeline {
             .with_context(|| format!("resolve pipeline directory: {}", manifest.display()))?;
         let mut variables = std::env::vars().collect::<BTreeMap<_, _>>();
         variables.insert("PROJECT_ROOT".into(), project_root.display().to_string());
+        if let Ok(executable) = std::env::current_exe() {
+            variables.insert("SVWB_EXE".into(), executable.display().to_string());
+        }
+        let mut file_variables = HashSet::new();
         if let Some(env_file) = &self.env_file {
             let path = project_root.join(env_file);
             if path.exists() {
                 for (key, value) in parse_env_file(&path)? {
+                    file_variables.insert(key.clone());
                     variables.entry(key).or_insert(value);
                 }
             }
         }
-        Ok(PipelineContext { variables })
+        Ok(PipelineContext {
+            variables,
+            file_variables,
+        })
     }
 
     pub fn plan(
@@ -262,7 +271,15 @@ impl PipelineContext {
         pipeline: &Pipeline,
         step: &PipelineStep,
     ) -> Result<BTreeMap<String, String>> {
-        let mut env = BTreeMap::new();
+        let mut env = self
+            .file_variables
+            .iter()
+            .filter_map(|key| {
+                self.variables
+                    .get(key)
+                    .map(|value| (key.clone(), value.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
         for source in [&pipeline.defaults.env, &step.env] {
             for (key, value) in source {
                 env.insert(key.clone(), expand(value, &self.variables)?);
@@ -467,10 +484,30 @@ optional_args = [{when_env = "DRY_RUN", args = ["--dry-run"]}]
         let mut variables = BTreeMap::new();
         variables.insert("PROJECT_ROOT".into(), "/repo".into());
         variables.insert("DRY_RUN".into(), "1".into());
-        let context = PipelineContext { variables };
+        let context = PipelineContext {
+            variables,
+            file_variables: HashSet::new(),
+        };
         let plan = pipeline.plan(&context, &selected).unwrap();
         assert_eq!(plan[0].cwd, "/repo");
         assert_eq!(plan[1].command.last().unwrap(), "--dry-run");
+    }
+
+    #[test]
+    fn passes_env_file_values_to_steps() {
+        let pipeline = pipeline();
+        let variables = BTreeMap::from([
+            ("PROJECT_ROOT".into(), "/repo".into()),
+            ("WBU_EXE".into(), "/tools/wbu".into()),
+            ("MODE".into(), "test".into()),
+        ]);
+        let context = PipelineContext {
+            variables,
+            file_variables: HashSet::from(["WBU_EXE".into()]),
+        };
+        let env = context.step_env(&pipeline, &pipeline.steps[0]).unwrap();
+        assert_eq!(env.get("WBU_EXE").map(String::as_str), Some("/tools/wbu"));
+        assert!(!env.contains_key("MODE"));
     }
 
     #[test]
